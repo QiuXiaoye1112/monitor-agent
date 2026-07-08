@@ -38,9 +38,12 @@ func UpdateBasicInfo() {
 }
 func uploadBasicInfo() error {
 	osname := monitoring.OSName()
+	ipv4, ipv6, _ := monitoring.GetIPAddress()
 
 	data := map[string]interface{}{
 		"os":         osname,
+		"ipv4":       ipv4,
+		"ipv6":       ipv6,
 		"mem_total":  monitoring.Ram().Total,
 		"swap_total": monitoring.Swap().Total,
 		"disk_total": monitoring.Disk().Total,
