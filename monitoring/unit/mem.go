@@ -9,7 +9,6 @@ import (
 	"strconv"
 	"strings"
 
-	pkg_flags "monitor-agent/cmd/flags"
 	"github.com/shirou/gopsutil/v4/mem"
 )
 
@@ -182,32 +181,14 @@ func CallFree() RamInfo {
 }
 
 func Ram() RamInfo {
-	// Use global config
-	if pkg_flags.GlobalConfig.MemoryIncludeCache {
-		v, err := mem.VirtualMemory()
-		if err != nil {
-			return RamInfo{}
-		}
-		return RamInfo{
-			Total: v.Total,
-			Used:  v.Total - v.Free,
-			Mode:  "includeCache",
-		}
-	}
-
-	if pkg_flags.GlobalConfig.MemoryReportRawUsed {
-		return GetMemHtopLike()
-	}
-
 	if runtime.GOOS == "linux" {
-		h := GetMemHtopLike()
-		if h.Total > 0 {
-			return h
-		}
+		r := CallFree()
+		if r.Total > 0 { return r }
 	}
 
-	// Default fallback
-	return GetMemGopsutil()
+	v, err := mem.VirtualMemory()
+	if err != nil { return RamInfo{} }
+	return RamInfo{Total: v.Total, Used: v.Used, Mode: "gopsutil"}
 }
 
 func Swap() RamInfo {
