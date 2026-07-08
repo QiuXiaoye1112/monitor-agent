@@ -2,7 +2,7 @@
 
 package cmd
 
-func WarnKomariRunning() {
+func WarnMonitorRunning() {
 	// No-op on non-Windows platforms
 	return
 }

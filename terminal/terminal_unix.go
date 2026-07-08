@@ -103,7 +103,7 @@ func newTerminalImpl() (*terminalImpl, error) {
 const motdShellPrelude = "for f in /etc/update-motd.d/*; do [ -e \"$f\" ] && [ -x \"$f\" ] && \"$f\"; done; [ -r /etc/motd ] && cat /etc/motd; exec \"$1\""
 
 func buildMotdShellCommand(shell string) *exec.Cmd {
-	return exec.Command("/bin/sh", "-c", motdShellPrelude, "komari-motd", shell)
+	return exec.Command("/bin/sh", "-c", motdShellPrelude, "monitor-motd", shell)
 }
 
 // unixTerminal 实现了 Unix 系统下的终端接口。

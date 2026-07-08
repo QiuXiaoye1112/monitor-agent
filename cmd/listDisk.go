@@ -5,7 +5,7 @@ import (
 	"log"
 	"text/tabwriter"
 
-	monitoring "github.com/komari-monitor/komari-agent/monitoring/unit"
+	monitoring "monitor-agent/monitoring/unit"
 	"github.com/shirou/gopsutil/v4/disk"
 	"github.com/spf13/cobra"
 )

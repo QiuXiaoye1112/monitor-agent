@@ -14,22 +14,21 @@ import (
 	"strings"
 	"syscall"
 
-	"github.com/komari-monitor/komari-agent/dnsresolver"
-	"github.com/komari-monitor/komari-agent/monitoring/netstatic"
-	monitoring "github.com/komari-monitor/komari-agent/monitoring/unit"
-	"github.com/komari-monitor/komari-agent/server"
-	"github.com/komari-monitor/komari-agent/update"
+	"monitor-agent/dnsresolver"
+	"monitor-agent/monitoring/netstatic"
+	monitoring "monitor-agent/monitoring/unit"
+	"monitor-agent/server"
 	"github.com/spf13/cobra"
 
-	pkg_flags "github.com/komari-monitor/komari-agent/cmd/flags"
+	pkg_flags "monitor-agent/cmd/flags"
 )
 
 var flags = pkg_flags.GlobalConfig
 
 var RootCmd = &cobra.Command{
-	Use:   "komari-agent",
-	Short: "komari agent",
-	Long:  `komari agent`,
+	Use:   "monitor-agent",
+	Short: "monitor agent",
+	Long:  `monitor agent`,
 	RunE: func(cmd *cobra.Command, args []string) error {
 		loadFromEnv() // 从环境变量加载配置，覆盖解析
 		if flags.ConfigFile != "" {
@@ -64,7 +63,7 @@ var RootCmd = &cobra.Command{
 		}
 
 		if !flags.DisableWebSsh {
-			go WarnKomariRunning()
+			go WarnMonitorRunning()
 		}
 
 		if flags.MonthRotate != 0 {
@@ -84,8 +83,7 @@ var RootCmd = &cobra.Command{
 			}
 		}
 
-		log.Println("Komari Agent", update.CurrentVersion)
-		log.Println("Github Repo:", update.Repo)
+		log.Println("Monitor Agent (final)")
 
 		// 设置 DNS 解析行为
 		if flags.CustomDNS != "" {
@@ -117,14 +115,6 @@ var RootCmd = &cobra.Command{
 		// 忽略不安全的证书
 		if flags.IgnoreUnsafeCert {
 			http.DefaultTransport.(*http.Transport).TLSClientConfig = &tls.Config{InsecureSkipVerify: true}
-		}
-		// 自动更新
-		if !flags.DisableAutoUpdate {
-			err := update.CheckAndUpdate()
-			if err != nil {
-				log.Println("[ERROR]", err)
-			}
-			go update.DoUpdateWorks()
 		}
 		go server.DoUploadBasicInfoWorks()
 		for {
@@ -161,10 +151,9 @@ func init() {
 	RootCmd.PersistentFlags().StringVarP(&flags.Endpoint, "endpoint", "e", "", "API endpoint")
 	//RootCmd.MarkPersistentFlagRequired("endpoint")
 	RootCmd.PersistentFlags().StringVar(&flags.AutoDiscoveryKey, "auto-discovery", "", "Auto discovery key for the agent")
-	RootCmd.PersistentFlags().BoolVar(&flags.DisableAutoUpdate, "disable-auto-update", false, "Disable automatic updates")
 	RootCmd.PersistentFlags().BoolVar(&flags.DisableWebSsh, "disable-web-ssh", false, "Disable remote control(web ssh and rce)")
 	//RootCmd.PersistentFlags().BoolVar(&flags.MemoryModeAvailable, "memory-mode-available", false, "[deprecated]Report memory as available instead of used.")
-	RootCmd.PersistentFlags().Float64VarP(&flags.Interval, "interval", "i", 3.0, "Interval in seconds")
+	RootCmd.PersistentFlags().Float64VarP(&flags.Interval, "interval", "i", 1.0, "Interval in seconds")
 	RootCmd.PersistentFlags().BoolVarP(&flags.IgnoreUnsafeCert, "ignore-unsafe-cert", "u", false, "Ignore unsafe certificate errors")
 	RootCmd.PersistentFlags().IntVarP(&flags.MaxRetries, "max-retries", "r", 3, "Maximum number of retries")
 	RootCmd.PersistentFlags().IntVarP(&flags.ReconnectInterval, "reconnect-interval", "c", 5, "Reconnect interval in seconds")

@@ -5,8 +5,8 @@ import (
 	"fmt"
 	"log"
 
-	pkg_flags "github.com/komari-monitor/komari-agent/cmd/flags"
-	unit "github.com/komari-monitor/komari-agent/monitoring/unit"
+	pkg_flags "monitor-agent/cmd/flags"
+	unit "monitor-agent/monitoring/unit"
 )
 
 var flags = pkg_flags.GlobalConfig
@@ -15,7 +15,7 @@ type report struct {
 	CPU         cpuReport         `json:"cpu"`
 	Ram         usageReport       `json:"ram"`
 	Swap        usageReport       `json:"swap"`
-	Load        loadReport        `json:"load"`
+	Load        interface{}       `json:"load,omitempty"`
 	Disk        usageReport       `json:"disk"`
 	Network     networkReport     `json:"network"`
 	Connections connectionsReport `json:"connections"`
@@ -32,12 +32,6 @@ type cpuReport struct {
 type usageReport struct {
 	Total uint64 `json:"total"`
 	Used  uint64 `json:"used"`
-}
-
-type loadReport struct {
-	Load1  float64 `json:"load1"`
-	Load5  float64 `json:"load5"`
-	Load15 float64 `json:"load15"`
 }
 
 type networkReport struct {
@@ -86,9 +80,6 @@ func GenerateReport() []byte {
 
 	swap := unit.Swap()
 	data.Swap = usageReport{Total: swap.Total, Used: swap.Used}
-	load := unit.Load()
-	data.Load = loadReport{Load1: load.Load1, Load5: load.Load5, Load15: load.Load15}
-
 	disk := unit.Disk()
 	data.Disk = usageReport{Total: disk.Total, Used: disk.Used}
 

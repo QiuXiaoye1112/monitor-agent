@@ -7,7 +7,7 @@ import (
 
 	"github.com/gorilla/websocket"
 
-	pkg_flags "github.com/komari-monitor/komari-agent/cmd/flags"
+	pkg_flags "monitor-agent/cmd/flags"
 )
 
 var flags = pkg_flags.GlobalConfig

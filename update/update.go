@@ -14,18 +14,18 @@ import (
 	"time"
 
 	"github.com/blang/semver"
-	"github.com/komari-monitor/komari-agent/dnsresolver"
+	"monitor-agent/dnsresolver"
 	"github.com/rhysd/go-github-selfupdate/selfupdate"
 )
 
 var (
 	CurrentVersion string = "0.0.1"
-	Repo           string = "komari-monitor/komari-agent"
+	Repo           string = "monitor-agent"
 )
 
 const (
 	snapshotVersionPrefix = "Snapshot-"
-	containerMarkerPath   = "/.komari-agent-container"
+	containerMarkerPath   = "/.monitor-agent-container"
 	githubAPIBaseURL      = "https://api.github.com"
 )
 
@@ -84,7 +84,7 @@ func detectBuildTrack(version string) buildTrack {
 }
 
 func expectedAssetName(goos, goarch string) string {
-	name := fmt.Sprintf("komari-agent-%s-%s", goos, goarch)
+	name := fmt.Sprintf("monitor-agent-%s-%s", goos, goarch)
 	if goos == "windows" {
 		name += ".exe"
 	}
@@ -168,7 +168,7 @@ func listGitHubReleases(owner, repo string) ([]githubRelease, error) {
 		}
 
 		req.Header.Set("Accept", "application/vnd.github+json")
-		req.Header.Set("User-Agent", "komari-agent")
+		req.Header.Set("User-Agent", "monitor-agent")
 		if token := os.Getenv("GITHUB_TOKEN"); token != "" {
 			req.Header.Set("Authorization", "Bearer "+token)
 		}
