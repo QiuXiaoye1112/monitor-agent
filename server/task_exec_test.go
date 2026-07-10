@@ -1,6 +1,7 @@
 package server
 
 import (
+	"context"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -66,7 +67,7 @@ func TestBuildTaskCommandUsesShellStdinUnix(t *testing.T) {
 		t.Skip("Unix shell script execution test")
 	}
 
-	cmd, cleanup, err := buildTaskCommand("printf done")
+	cmd, cleanup, err := buildTaskCommand(context.Background(), "printf done")
 	if err != nil {
 		t.Fatalf("buildTaskCommand returned error: %v", err)
 	}
@@ -88,7 +89,7 @@ func TestBuildTaskCommandWritesUtf8BomWindows(t *testing.T) {
 		t.Skip("Windows PowerShell script execution test")
 	}
 
-	cmd, cleanup, err := buildTaskCommand("Write-Output '你好'")
+	cmd, cleanup, err := buildTaskCommand(context.Background(), "Write-Output '你好'")
 	if err != nil {
 		t.Fatalf("buildTaskCommand returned error: %v", err)
 	}

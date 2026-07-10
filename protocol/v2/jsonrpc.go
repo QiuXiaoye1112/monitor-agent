@@ -26,6 +26,7 @@ type Request struct {
 	Method  string      `json:"method"`
 	Params  interface{} `json:"params,omitempty"`
 	ID      interface{} `json:"id,omitempty"`
+	EventID string      `json:"event_id,omitempty"`
 }
 
 type Response struct {
@@ -64,8 +65,8 @@ func NewRequest(id interface{}, method string, params interface{}) []byte {
 	return payload
 }
 
-func BuildReportPayload(report v1.ReportPayload) []byte {
-	return NewNotification(MethodAgentReport, reportParams{Report: json.RawMessage(report)})
+func BuildReportPayload(report v1.ReportPayload, ackEventIDs []string) []byte {
+	return NewNotification(MethodAgentReport, reportParams{Report: json.RawMessage(report), AckEventIDs: ackEventIDs})
 }
 
 func BuildReportRequest(id interface{}, report v1.ReportPayload, ackEventIDs []string) []byte {

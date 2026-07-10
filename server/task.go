@@ -16,11 +16,19 @@ import (
 	"strings"
 	"time"
 
+	ping "github.com/prometheus-community/pro-bing"
 	"monitor-agent/dnsresolver"
 	v2 "monitor-agent/protocol/v2"
 	"monitor-agent/ws"
-	ping "github.com/prometheus-community/pro-bing"
 )
+
+const (
+	taskTimeout        = 60 * time.Second
+	maxTaskOutputSize  = 1 << 20 // 1 MiB per stream
+	maxConcurrentTasks = 4
+)
+
+var taskSlots = make(chan struct{}, maxConcurrentTasks)
 
 func NewTask(task_id, command string) {
 	if task_id == "" {
@@ -34,19 +42,28 @@ func NewTask(task_id, command string) {
 		uploadTaskResult(task_id, "Remote control is disabled.", -1, time.Now())
 		return
 	}
-	log.Printf("Executing task %s with command: %s", task_id, command)
+	select {
+	case taskSlots <- struct{}{}:
+		defer func() { <-taskSlots }()
+	default:
+		uploadTaskResult(task_id, "Too many concurrent remote tasks.", -1, time.Now())
+		return
+	}
+	log.Printf("Executing task %s", task_id)
 	result, exitCode := runTaskCommand(command)
 	uploadTaskResult(task_id, result, exitCode, time.Now())
 }
 
 func runTaskCommand(command string) (string, int) {
-	cmd, cleanup, err := buildTaskCommand(command)
+	ctx, cancel := context.WithTimeout(context.Background(), taskTimeout)
+	defer cancel()
+	cmd, cleanup, err := buildTaskCommand(ctx, command)
 	if err != nil {
 		return err.Error(), -1
 	}
 	defer cleanup()
 
-	var stdout, stderr bytes.Buffer
+	var stdout, stderr limitedBuffer
 	cmd.Stdout = &stdout
 	cmd.Stderr = &stderr
 
@@ -56,9 +73,15 @@ func runTaskCommand(command string) (string, int) {
 	if stderr.Len() > 0 {
 		result = appendErrorResult(result, stderr.String())
 	}
+	if stdout.Truncated() || stderr.Truncated() {
+		result = appendErrorResult(result, "[output truncated]")
+	}
 	result = strings.ReplaceAll(result, "\r\n", "\n")
 	exitCode := 0
-	if err != nil {
+	if ctx.Err() == context.DeadlineExceeded {
+		result = appendErrorResult(result, "command timed out")
+		exitCode = -1
+	} else if err != nil {
 		if exitError, ok := err.(*exec.ExitError); ok {
 			exitCode = exitError.ExitCode()
 		} else {
@@ -70,7 +93,28 @@ func runTaskCommand(command string) (string, int) {
 	return result, exitCode
 }
 
-func buildTaskCommand(command string) (*exec.Cmd, func(), error) {
+type limitedBuffer struct {
+	bytes.Buffer
+	truncated bool
+}
+
+func (b *limitedBuffer) Write(p []byte) (int, error) {
+	remaining := maxTaskOutputSize - b.Len()
+	if remaining <= 0 {
+		b.truncated = true
+		return len(p), nil
+	}
+	if len(p) > remaining {
+		_, _ = b.Buffer.Write(p[:remaining])
+		b.truncated = true
+		return len(p), nil
+	}
+	return b.Buffer.Write(p)
+}
+
+func (b *limitedBuffer) Truncated() bool { return b.truncated }
+
+func buildTaskCommand(ctx context.Context, command string) (*exec.Cmd, func(), error) {
 	var cmd *exec.Cmd
 	if runtime.GOOS == "windows" {
 		scriptFile, err := os.CreateTemp("", "monitor-task-*.ps1")
@@ -95,10 +139,10 @@ func buildTaskCommand(command string) (*exec.Cmd, func(), error) {
 			cleanup()
 			return nil, func() {}, err
 		}
-		cmd = exec.Command("powershell", "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", scriptFile.Name())
+		cmd = exec.CommandContext(ctx, "powershell", "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", scriptFile.Name())
 		return cmd, cleanup, nil
 	} else {
-		cmd = exec.Command("sh", "-s")
+		cmd = exec.CommandContext(ctx, "sh", "-s")
 		cmd.Stdin = strings.NewReader(command)
 	}
 	return cmd, func() {}, nil
@@ -347,7 +391,7 @@ func NewPingTask(conn *ws.SafeConn, protocolVersion int, taskID uint, pingType, 
 	if protocolVersion >= 2 {
 		wsPayload = v2.BuildPingResultPayload(taskID, pingType, pingResult, finishedAt)
 	}
-	
+
 	// -1 代表丢包，服务端计算
 	//if pingResult == -1 {
 	//	return

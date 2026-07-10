@@ -101,9 +101,9 @@ func TestExpectedAssetName(t *testing.T) {
 		goarch string
 		want   string
 	}{
-		{"linux", "amd64", "komari-agent-linux-amd64"},
-		{"darwin", "arm64", "komari-agent-darwin-arm64"},
-		{"windows", "amd64", "komari-agent-windows-amd64.exe"},
+		{"linux", "amd64", "monitor-agent-linux-amd64"},
+		{"darwin", "arm64", "monitor-agent-darwin-arm64"},
+		{"windows", "amd64", "monitor-agent-windows-amd64.exe"},
 	}
 
 	for _, tt := range tests {
@@ -115,14 +115,14 @@ func TestExpectedAssetName(t *testing.T) {
 }
 
 func TestSelectLatestSnapshotRelease(t *testing.T) {
-	assetName := "komari-agent-linux-amd64"
+	assetName := "monitor-agent-linux-amd64"
 	base := time.Date(2026, 7, 6, 12, 0, 0, 0, time.UTC)
 
 	releases := []githubRelease{
 		testRelease("v9.9.9", false, false, base.Add(5*time.Hour), assetName),
 		testRelease("Snapshot-2607061400", true, true, base.Add(4*time.Hour), assetName),
 		testRelease("beta-2607061500", true, false, base.Add(6*time.Hour), assetName),
-		testRelease("Snapshot-2607061600", true, false, base.Add(7*time.Hour), "komari-agent-linux-arm64"),
+		testRelease("Snapshot-2607061600", true, false, base.Add(7*time.Hour), "monitor-agent-linux-arm64"),
 		testRelease("Snapshot-2607061200", true, false, base, assetName),
 		testRelease("Snapshot-2607061300", true, false, base.Add(time.Hour), assetName),
 	}
@@ -140,7 +140,7 @@ func TestSelectLatestSnapshotRelease(t *testing.T) {
 }
 
 func TestSelectLatestSnapshotReleaseTieBreaksByTag(t *testing.T) {
-	assetName := "komari-agent-linux-amd64"
+	assetName := "monitor-agent-linux-amd64"
 	publishedAt := time.Date(2026, 7, 6, 12, 0, 0, 0, time.UTC)
 
 	releases := []githubRelease{
@@ -159,12 +159,12 @@ func TestSelectLatestSnapshotReleaseTieBreaksByTag(t *testing.T) {
 
 func TestSelectLatestSnapshotReleaseNoMatch(t *testing.T) {
 	releases := []githubRelease{
-		testRelease("v1.2.3", false, false, time.Now(), "komari-agent-linux-amd64"),
-		testRelease("Snapshot-2607061200", true, true, time.Now(), "komari-agent-linux-amd64"),
-		testRelease("Snapshot-2607061300", true, false, time.Now(), "komari-agent-linux-arm64"),
+		testRelease("v1.2.3", false, false, time.Now(), "monitor-agent-linux-amd64"),
+		testRelease("Snapshot-2607061200", true, true, time.Now(), "monitor-agent-linux-amd64"),
+		testRelease("Snapshot-2607061300", true, false, time.Now(), "monitor-agent-linux-arm64"),
 	}
 
-	if got, ok := selectLatestSnapshotRelease(releases, "komari-agent-linux-amd64"); ok {
+	if got, ok := selectLatestSnapshotRelease(releases, "monitor-agent-linux-amd64"); ok {
 		t.Fatalf("selectLatestSnapshotRelease() = %+v, want no candidate", got)
 	}
 }

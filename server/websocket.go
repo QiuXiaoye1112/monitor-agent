@@ -27,7 +27,10 @@ var (
 	v2AckMu       sync.Mutex
 	v2AckEventIDs []string
 	v2SeenEvents  = make(map[string]struct{})
+	v2SeenOrder   []string
 )
+
+const maxRememberedV2Events = 1024
 
 func EstablishWebSocketConnection() {
 	var conn *ws.SafeConn
@@ -111,8 +114,10 @@ func EstablishWebSocketConnection() {
 			}
 
 			data := monitoring.GenerateReport()
+			var ackIDs []string
 			if activeProtocol >= 2 {
-				data = v2.BuildReportPayload(data)
+				ackIDs = snapshotV2AckEventIDs()
+				data = v2.BuildReportPayload(data, ackIDs)
 			}
 			err = conn.WriteMessage(websocket.TextMessage, data)
 			if err != nil {
@@ -125,6 +130,9 @@ func EstablishWebSocketConnection() {
 					nextProtocol = 2
 				}
 				continue
+			}
+			if activeProtocol >= 2 {
+				clearV2AckEventIDs(ackIDs)
 			}
 		case <-heartbeatTicker.C:
 			if conn != nil {
@@ -354,6 +362,12 @@ func markV2EventSeen(id string) bool {
 		return false
 	}
 	v2SeenEvents[id] = struct{}{}
+	v2SeenOrder = append(v2SeenOrder, id)
+	if len(v2SeenOrder) > maxRememberedV2Events {
+		oldest := v2SeenOrder[0]
+		delete(v2SeenEvents, oldest)
+		v2SeenOrder = v2SeenOrder[1:]
+	}
 	return true
 }
 
@@ -385,6 +399,7 @@ func handleWebSocketMessages(conn *ws.SafeConn, protocolVersion int, done chan<-
 			JSONRPC string      `json:"jsonrpc,omitempty"`
 			Method  string      `json:"method,omitempty"`
 			Params  interface{} `json:"params,omitempty"`
+			EventID string      `json:"event_id,omitempty"`
 			Message string      `json:"message"`
 			// Terminal
 			TerminalId string `json:"request_id,omitempty"`
@@ -402,7 +417,9 @@ func handleWebSocketMessages(conn *ws.SafeConn, protocolVersion int, done chan<-
 			continue
 		}
 		if message.JSONRPC == v2.Version && protocolVersion >= 2 {
-			processV2Event(conn, message.Method, message.Params, "")
+			if processV2Event(conn, message.Method, message.Params, message.EventID) {
+				addV2AckEventID(message.EventID)
+			}
 			continue
 		}
 
