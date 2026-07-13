@@ -18,6 +18,7 @@ const (
 	MethodAgentMessage    = "agent.message"
 	MethodAgentEvent      = "agent.event"
 	MethodAgentTerminal   = "agent.terminal.request"
+	MethodAgentFile       = "agent.file.request"
 	MethodAgentPull       = "agent.pull"
 )
 

@@ -16,6 +16,7 @@ import (
 
 	"github.com/gorilla/websocket"
 	"monitor-agent/dnsresolver"
+	"monitor-agent/filemanager"
 	"monitor-agent/monitoring"
 	v2 "monitor-agent/protocol/v2"
 	"monitor-agent/terminal"
@@ -231,7 +232,7 @@ func runV2PullLoop(ctx context.Context, errCh chan<- error) {
 		pullID := fmt.Sprintf("pull-%d", time.Now().UnixNano())
 		ackIDs := snapshotV2AckEventIDs()
 		payload := v2.NewRequest(pullID, v2.MethodAgentPull, map[string]interface{}{
-			"capabilities":  []string{"exec", "ping", "message", "event", "terminal"},
+			"capabilities":  []string{"exec", "ping", "message", "event", "terminal", "file"},
 			"ack_event_ids": ackIDs,
 		})
 		resp, err := postV2RequestContext(ctx, payload)
@@ -423,6 +424,10 @@ func handleWebSocketMessages(conn *ws.SafeConn, protocolVersion int, done chan<-
 			continue
 		}
 
+		if message.Message == "file" {
+			go establishFileConnection(flags.Token, message.TerminalId, flags.Endpoint)
+			continue
+		}
 		if message.Message == "terminal" || message.TerminalId != "" {
 			go establishTerminalConnection(flags.Token, message.TerminalId, flags.Endpoint)
 			continue
@@ -476,6 +481,16 @@ func processV2Event(conn *ws.SafeConn, method string, params interface{}, eventI
 		} else {
 			log.Printf("bad v2 terminal params: %v", err)
 		}
+	case v2.MethodAgentFile:
+		var p struct {
+			RequestID string `json:"request_id"`
+		}
+		if err := v2.BindParams(params, &p); err == nil {
+			go establishFileConnection(flags.Token, p.RequestID, flags.Endpoint)
+			return true
+		} else {
+			log.Printf("bad v2 file params: %v", err)
+		}
 	case v2.MethodAgentMessage, v2.MethodAgentEvent:
 		log.Printf("received v2 %s: %+v", method, params)
 		return true
@@ -515,6 +530,23 @@ func establishTerminalConnection(token, id, endpoint string) {
 	if conn != nil {
 		conn.Close()
 	}
+}
+
+func establishFileConnection(token, id, endpoint string) {
+	endpoint = strings.TrimSuffix(endpoint, "/") + "/api/clients/files?token=" + token + "&id=" + id
+	endpoint = "ws" + strings.TrimPrefix(endpoint, "http")
+	if convertedEndpoint, err := utils.ConvertIDNToASCII(endpoint); err == nil {
+		endpoint = convertedEndpoint
+	} else {
+		log.Printf("Warning: Failed to convert file WebSocket IDN to ASCII: %v", err)
+	}
+	conn, _, err := newWSDialer().Dial(endpoint, newWSHeaders())
+	if err != nil {
+		log.Println("Failed to establish file manager connection:", err)
+		return
+	}
+	filemanager.Start(conn)
+	_ = conn.Close()
 }
 
 // newWSDialer 构造统一的 WebSocket 拨号器（自定义解析、IPv4/IPv6 动态排序、可选 TLS 忽略）
