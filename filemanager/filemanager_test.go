@@ -18,6 +18,9 @@ func newTestService(t *testing.T) *service {
 
 func TestFileOperations(t *testing.T) {
 	svc := newTestService(t)
+	if _, err := svc.handle(request{Type: "ping"}); err != nil {
+		t.Fatalf("heartbeat failed: %v", err)
+	}
 	if err := svc.mkdir("", "docs"); err != nil {
 		t.Fatal(err)
 	}

@@ -130,6 +130,8 @@ func (s *service) close() {
 
 func (s *service) handle(req request) (interface{}, error) {
 	switch req.Type {
+	case "ping":
+		return map[string]interface{}{"time": time.Now().Unix()}, nil
 	case "list":
 		return s.list(req.Path, req.Offset, req.Limit)
 	case "read":
