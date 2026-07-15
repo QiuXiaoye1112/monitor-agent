@@ -30,20 +30,21 @@ const (
 )
 
 type request struct {
-	ID         string `json:"id"`
-	Type       string `json:"type"`
-	Path       string `json:"path,omitempty"`
-	Name       string `json:"name,omitempty"`
-	NewName    string `json:"new_name,omitempty"`
-	Content    string `json:"content,omitempty"`
-	ContentB64 string `json:"content_base64,omitempty"`
-	Data       string `json:"data,omitempty"`
-	UploadID   string `json:"upload_id,omitempty"`
-	DownloadID string `json:"download_id,omitempty"`
-	Offset     int64  `json:"offset,omitempty"`
-	Size       int64  `json:"size,omitempty"`
-	Limit      int    `json:"limit,omitempty"`
-	Overwrite  bool   `json:"overwrite,omitempty"`
+	ID          string `json:"id"`
+	Type        string `json:"type"`
+	Path        string `json:"path,omitempty"`
+	Destination string `json:"destination,omitempty"`
+	Name        string `json:"name,omitempty"`
+	NewName     string `json:"new_name,omitempty"`
+	Content     string `json:"content,omitempty"`
+	ContentB64  string `json:"content_base64,omitempty"`
+	Data        string `json:"data,omitempty"`
+	UploadID    string `json:"upload_id,omitempty"`
+	DownloadID  string `json:"download_id,omitempty"`
+	Offset      int64  `json:"offset,omitempty"`
+	Size        int64  `json:"size,omitempty"`
+	Limit       int    `json:"limit,omitempty"`
+	Overwrite   bool   `json:"overwrite,omitempty"`
 }
 
 type response struct {
@@ -152,6 +153,10 @@ func (s *service) handle(req request) (interface{}, error) {
 		return nil, s.mkdir(req.Path, req.Name)
 	case "rename":
 		return nil, s.rename(req.Path, req.NewName)
+	case "copy":
+		return nil, s.copy(req.Path, req.Destination)
+	case "move":
+		return nil, s.move(req.Path, req.Destination)
 	case "delete":
 		return nil, s.remove(req.Path)
 	case "upload_start":
@@ -341,6 +346,151 @@ func (s *service) rename(raw, newName string) error {
 		return err
 	}
 	return os.Rename(path, filepath.Join(filepath.Dir(path), newName))
+}
+
+func (s *service) copy(rawSource, rawDestination string) error {
+	source, target, err := s.transferPaths(rawSource, rawDestination)
+	if err != nil {
+		return err
+	}
+	return copyPath(source, target)
+}
+
+func (s *service) move(rawSource, rawDestination string) error {
+	source, target, err := s.transferPaths(rawSource, rawDestination)
+	if err != nil {
+		return err
+	}
+	if err := os.Rename(source, target); err == nil {
+		return nil
+	}
+	if err := copyPath(source, target); err != nil {
+		return err
+	}
+	info, err := os.Lstat(source)
+	if err != nil {
+		_ = os.RemoveAll(target)
+		return err
+	}
+	if info.IsDir() {
+		err = os.RemoveAll(source)
+	} else {
+		err = os.Remove(source)
+	}
+	if err != nil {
+		return fmt.Errorf("目标已创建，但无法删除原文件: %w", err)
+	}
+	return nil
+}
+
+func (s *service) transferPaths(rawSource, rawDestination string) (string, string, error) {
+	source, err := s.cleanPath(rawSource)
+	if err != nil {
+		return "", "", err
+	}
+	if source == filepath.Clean(s.home) || filepath.Dir(source) == source {
+		return "", "", errors.New("不能复制或移动主目录或文件系统根目录")
+	}
+	if _, err := os.Lstat(source); err != nil {
+		return "", "", err
+	}
+	destination, err := s.cleanPath(rawDestination)
+	if err != nil {
+		return "", "", err
+	}
+	destinationInfo, err := os.Stat(destination)
+	if err != nil {
+		return "", "", err
+	}
+	if !destinationInfo.IsDir() {
+		return "", "", errors.New("目标位置不是文件夹")
+	}
+	target := filepath.Join(destination, filepath.Base(source))
+	if target == source {
+		return "", "", errors.New("源文件和目标位置相同")
+	}
+	if isPathWithin(source, target) {
+		return "", "", errors.New("不能复制或移动到自身目录中")
+	}
+	if _, err := os.Lstat(target); err == nil {
+		return "", "", errors.New("目标位置已存在同名文件")
+	} else if !os.IsNotExist(err) {
+		return "", "", err
+	}
+	return source, target, nil
+}
+
+func isPathWithin(parent, child string) bool {
+	relative, err := filepath.Rel(parent, child)
+	if err != nil || relative == "." || relative == ".." {
+		return false
+	}
+	return !strings.HasPrefix(relative, ".."+string(filepath.Separator))
+}
+
+func copyPath(source, target string) (err error) {
+	info, err := os.Lstat(source)
+	if err != nil {
+		return err
+	}
+	created := false
+	defer func() {
+		if err != nil && created {
+			_ = os.RemoveAll(target)
+		}
+	}()
+
+	switch {
+	case info.Mode()&os.ModeSymlink != 0:
+		linkTarget, readErr := os.Readlink(source)
+		if readErr != nil {
+			return readErr
+		}
+		if err = os.Symlink(linkTarget, target); err != nil {
+			return err
+		}
+		created = true
+		return nil
+	case info.IsDir():
+		if err = os.Mkdir(target, info.Mode().Perm()); err != nil {
+			return err
+		}
+		created = true
+		entries, readErr := os.ReadDir(source)
+		if readErr != nil {
+			return readErr
+		}
+		for _, entry := range entries {
+			if err = copyPath(filepath.Join(source, entry.Name()), filepath.Join(target, entry.Name())); err != nil {
+				return err
+			}
+		}
+		return os.Chtimes(target, info.ModTime(), info.ModTime())
+	case info.Mode().IsRegular():
+		input, openErr := os.Open(source)
+		if openErr != nil {
+			return openErr
+		}
+		defer input.Close()
+		output, createErr := os.OpenFile(target, os.O_WRONLY|os.O_CREATE|os.O_EXCL, info.Mode().Perm())
+		if createErr != nil {
+			return createErr
+		}
+		created = true
+		if _, err = io.Copy(output, input); err == nil {
+			err = output.Sync()
+		}
+		closeErr := output.Close()
+		if err != nil {
+			return err
+		}
+		if closeErr != nil {
+			return closeErr
+		}
+		return os.Chtimes(target, info.ModTime(), info.ModTime())
+	default:
+		return errors.New("不支持复制特殊设备文件")
+	}
 }
 
 func (s *service) remove(raw string) error {

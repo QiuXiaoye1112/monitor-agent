@@ -113,6 +113,65 @@ func TestFileSafetyLimits(t *testing.T) {
 	}
 }
 
+func TestCopyAndMoveOperations(t *testing.T) {
+	svc := newTestService(t)
+	sourceDir := filepath.Join(svc.home, "source")
+	destinationDir := filepath.Join(svc.home, "destination")
+	if err := os.MkdirAll(filepath.Join(sourceDir, "nested"), 0750); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Mkdir(destinationDir, 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(sourceDir, "nested", "note.txt"), []byte("copied content"), 0640); err != nil {
+		t.Fatal(err)
+	}
+
+	if _, err := svc.handle(request{Type: "copy", Path: sourceDir, Destination: destinationDir}); err != nil {
+		t.Fatalf("copy failed: %v", err)
+	}
+	copied := filepath.Join(destinationDir, "source", "nested", "note.txt")
+	content, err := os.ReadFile(copied)
+	if err != nil || string(content) != "copied content" {
+		t.Fatalf("copied content = %q, err = %v", content, err)
+	}
+
+	moveTarget := filepath.Join(svc.home, "moved")
+	if err := os.Mkdir(moveTarget, 0755); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := svc.handle(request{Type: "move", Path: copied, Destination: moveTarget}); err != nil {
+		t.Fatalf("move failed: %v", err)
+	}
+	if _, err := os.Stat(copied); !os.IsNotExist(err) {
+		t.Fatalf("source still exists after move: %v", err)
+	}
+	movedContent, err := os.ReadFile(filepath.Join(moveTarget, "note.txt"))
+	if err != nil || string(movedContent) != "copied content" {
+		t.Fatalf("moved content = %q, err = %v", movedContent, err)
+	}
+}
+
+func TestCopyAndMoveSafety(t *testing.T) {
+	svc := newTestService(t)
+	sourceDir := filepath.Join(svc.home, "source")
+	if err := os.MkdirAll(filepath.Join(sourceDir, "nested"), 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(sourceDir, "file.txt"), []byte("data"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	if err := svc.copy(sourceDir, filepath.Join(sourceDir, "nested")); err == nil {
+		t.Fatal("expected copying a directory into itself to fail")
+	}
+	if err := svc.copy(filepath.Join(sourceDir, "file.txt"), sourceDir); err == nil {
+		t.Fatal("expected copying over an existing file to fail")
+	}
+	if err := svc.move(svc.home, sourceDir); err == nil {
+		t.Fatal("expected moving the home directory to fail")
+	}
+}
+
 func TestListHonorsRequestedLimitUpToMaximum(t *testing.T) {
 	svc := newTestService(t)
 	for i := 0; i < 250; i++ {
