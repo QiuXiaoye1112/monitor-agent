@@ -1,6 +1,7 @@
 package filemanager
 
 import (
+	"archive/zip"
 	"encoding/base64"
 	"fmt"
 	"os"
@@ -11,7 +12,7 @@ import (
 func newTestService(t *testing.T) *service {
 	t.Helper()
 	home := t.TempDir()
-	svc := &service{home: home, uploads: make(map[string]*uploadState), downloads: make(map[string]*downloadState)}
+	svc := &service{home: home, root: home, uploads: make(map[string]*uploadState), downloads: make(map[string]*downloadState)}
 	t.Cleanup(svc.close)
 	return svc
 }
@@ -21,7 +22,7 @@ func TestFileOperations(t *testing.T) {
 	if _, err := svc.handle(request{Type: "ping"}); err != nil {
 		t.Fatalf("heartbeat failed: %v", err)
 	}
-	if err := svc.mkdir("", "docs"); err != nil {
+	if err := svc.mkdir(svc.home, "docs"); err != nil {
 		t.Fatal(err)
 	}
 	if err := svc.create(filepath.Join(svc.home, "docs"), "note.txt"); err != nil {
@@ -31,7 +32,7 @@ func TestFileOperations(t *testing.T) {
 	if err := svc.writeText(note, "hello 世界"); err != nil {
 		t.Fatal(err)
 	}
-	read, err := svc.readText(note)
+	read, err := svc.readText(note, true)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -43,7 +44,7 @@ func TestFileOperations(t *testing.T) {
 	if err := svc.rename(note, "renamed.txt"); err != nil {
 		t.Fatal(err)
 	}
-	list, err := svc.list(filepath.Join(svc.home, "docs"), 0, 10)
+	list, err := svc.list(filepath.Join(svc.home, "docs"), 0, 10, true, "name", "asc")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -62,7 +63,7 @@ func TestFileOperations(t *testing.T) {
 func TestChunkedUploadDownload(t *testing.T) {
 	svc := newTestService(t)
 	want := []byte("chunked file data")
-	started, err := svc.uploadStart("", "data.bin", int64(len(want)), false)
+	started, err := svc.uploadStart(svc.home, "data.bin", int64(len(want)), false)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -99,13 +100,13 @@ func TestChunkedUploadDownload(t *testing.T) {
 
 func TestFileSafetyLimits(t *testing.T) {
 	svc := newTestService(t)
-	if err := svc.create("", "../escape"); err == nil {
+	if err := svc.create(svc.home, "../escape"); err == nil {
 		t.Fatal("expected invalid name to fail")
 	}
 	if err := svc.remove(svc.home); err == nil {
 		t.Fatal("expected deleting home to fail")
 	}
-	if _, err := svc.uploadStart("", "large.bin", maxTransferSize+1, false); err == nil {
+	if _, err := svc.uploadStart(svc.home, "large.bin", maxTransferSize+1, false); err == nil {
 		t.Fatal("expected oversized upload to fail")
 	}
 	if err := svc.writeText(filepath.Join(svc.home, "large.txt"), string(make([]byte, maxTextSize+1))); err == nil {
@@ -181,12 +182,214 @@ func TestListHonorsRequestedLimitUpToMaximum(t *testing.T) {
 		}
 	}
 
-	result, err := svc.list("", 0, 1000)
+	result, err := svc.list("", 0, 1000, true, "name", "asc")
 	if err != nil {
 		t.Fatal(err)
 	}
 	items := result.(map[string]interface{})["items"].([]map[string]interface{})
 	if len(items) != 250 {
 		t.Fatalf("got %d items, want 250", len(items))
+	}
+}
+
+func TestDeleteNonEmptyDirectoryRequiresRecursiveConfirmation(t *testing.T) {
+	svc := newTestService(t)
+	dir := filepath.Join(svc.home, "nested")
+	if err := os.MkdirAll(dir, 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "note.txt"), []byte("content"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	if err := svc.removeWithOptions(dir, false); err == nil {
+		t.Fatal("expected non-empty directory to require confirmation")
+	} else if _, code, _ := publicError(err); code != "directory_not_empty" {
+		t.Fatalf("unexpected error code: %s (%v)", code, err)
+	}
+	if err := svc.removeWithOptions(dir, true); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Lstat(dir); !os.IsNotExist(err) {
+		t.Fatalf("directory still exists: %v", err)
+	}
+}
+
+func TestDeleteSymlinkDoesNotDeleteTarget(t *testing.T) {
+	svc := newTestService(t)
+	target := filepath.Join(svc.home, "target")
+	link := filepath.Join(svc.home, "link")
+	if err := os.Mkdir(target, 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(target, "keep.txt"), []byte("keep"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(target, link); err != nil {
+		t.Fatal(err)
+	}
+	if err := svc.removeWithOptions(link, true); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Lstat(link); !os.IsNotExist(err) {
+		t.Fatalf("link still exists: %v", err)
+	}
+	if content, err := os.ReadFile(filepath.Join(target, "keep.txt")); err != nil || string(content) != "keep" {
+		t.Fatalf("symlink target changed: %q, %v", content, err)
+	}
+}
+
+func TestBatchDeleteAndPathScope(t *testing.T) {
+	svc := newTestService(t)
+	first := filepath.Join(svc.home, "first.txt")
+	second := filepath.Join(svc.home, "second")
+	if err := os.WriteFile(first, []byte("first"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Mkdir(second, 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(second, "child"), []byte("second"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	result, err := svc.removeMany([]string{first, second}, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	entries := result.(map[string]interface{})["results"].([]map[string]interface{})
+	if len(entries) != 2 || !entries[0]["ok"].(bool) || !entries[1]["ok"].(bool) {
+		t.Fatalf("unexpected batch result: %#v", result)
+	}
+	if _, err := svc.cleanPath("/etc/passwd"); err == nil {
+		t.Fatal("expected path outside allowed root to fail")
+	}
+	if _, err := svc.cleanPath("../../etc/passwd"); err == nil {
+		t.Fatal("expected traversal path to fail")
+	}
+	if err := svc.removeWithOptions("", true); err == nil {
+		t.Fatal("expected empty delete path to fail")
+	}
+}
+
+func TestBinaryFilesAreNotOpenedAsText(t *testing.T) {
+	svc := newTestService(t)
+	path := filepath.Join(svc.home, "binary.bin")
+	if err := os.WriteFile(path, []byte{0, 1, 2, 3}, 0644); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := svc.readText(path, true); err == nil {
+		t.Fatal("expected binary file to be rejected")
+	} else if _, code, _ := publicError(err); code != "binary_file" {
+		t.Fatalf("unexpected error code: %s (%v)", code, err)
+	}
+}
+
+func TestArchiveExtractionRejectsTraversal(t *testing.T) {
+	svc := newTestService(t)
+	source := filepath.Join(svc.home, "source.txt")
+	if err := os.WriteFile(source, []byte("archive"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	archived, err := svc.archive([]string{source}, svc.home, "bundle", "zip")
+	if err != nil {
+		t.Fatal(err)
+	}
+	archivePath := archived.(map[string]interface{})["path"].(string)
+	destination := filepath.Join(svc.home, "out")
+	if err := os.Mkdir(destination, 0755); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := svc.extract(archivePath, destination); err != nil {
+		t.Fatal(err)
+	}
+	if content, err := os.ReadFile(filepath.Join(destination, "source.txt")); err != nil || string(content) != "archive" {
+		t.Fatalf("unexpected extracted content %q, %v", content, err)
+	}
+	malicious := filepath.Join(svc.home, "malicious.zip")
+	output, err := os.Create(malicious)
+	if err != nil {
+		t.Fatal(err)
+	}
+	writer := zip.NewWriter(output)
+	entry, err := writer.Create("../../outside.txt")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := entry.Write([]byte("must not escape")); err != nil {
+		t.Fatal(err)
+	}
+	if err := writer.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if err := output.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := svc.extract(malicious, destination); err == nil {
+		t.Fatal("expected malicious archive extraction to fail")
+	} else if _, code, _ := publicError(err); code != "archive_path_traversal" {
+		t.Fatalf("unexpected error code: %s (%v)", code, err)
+	}
+	if _, err := os.Stat(filepath.Join(svc.home, "outside.txt")); !os.IsNotExist(err) {
+		t.Fatalf("archive wrote outside destination: %v", err)
+	}
+	escape := t.TempDir()
+	if err := os.Symlink(escape, filepath.Join(destination, "linked")); err != nil {
+		t.Fatal(err)
+	}
+	symlinkArchive := filepath.Join(svc.home, "symlink.zip")
+	symlinkOutput, err := os.Create(symlinkArchive)
+	if err != nil {
+		t.Fatal(err)
+	}
+	symlinkWriter := zip.NewWriter(symlinkOutput)
+	symlinkEntry, err := symlinkWriter.Create("linked/escaped.txt")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := symlinkEntry.Write([]byte("must not follow link")); err != nil {
+		t.Fatal(err)
+	}
+	if err := symlinkWriter.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if err := symlinkOutput.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := svc.extract(symlinkArchive, destination); err == nil {
+		t.Fatal("expected symlink traversal extraction to fail")
+	}
+	if _, err := os.Stat(filepath.Join(escape, "escaped.txt")); !os.IsNotExist(err) {
+		t.Fatalf("archive followed destination symlink: %v", err)
+	}
+}
+
+func TestConflictRenameAndChmod(t *testing.T) {
+	svc := newTestService(t)
+	source := filepath.Join(svc.home, "note.txt")
+	destination := filepath.Join(svc.home, "destination")
+	if err := os.WriteFile(source, []byte("source"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Mkdir(destination, 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(destination, "note.txt"), []byte("existing"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	result, err := svc.copyWithConflict(source, destination, "rename")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := filepath.Base(result.(map[string]interface{})["path"].(string)); got != "note (1).txt" {
+		t.Fatalf("unexpected renamed copy: %q", got)
+	}
+	if err := svc.chmod(source, "600"); err != nil {
+		t.Fatal(err)
+	}
+	info, err := os.Stat(source)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if info.Mode().Perm() != 0600 {
+		t.Fatalf("permissions = %o, want 600", info.Mode().Perm())
 	}
 }
