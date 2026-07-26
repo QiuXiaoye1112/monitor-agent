@@ -18,6 +18,7 @@ import (
 	"monitor-agent/dnsresolver"
 	"monitor-agent/filemanager"
 	"monitor-agent/monitoring"
+	v1 "monitor-agent/protocol/v1"
 	v2 "monitor-agent/protocol/v2"
 	"monitor-agent/terminal"
 	"monitor-agent/utils"
@@ -43,9 +44,12 @@ func EstablishWebSocketConnection() {
 	}()
 	var err error
 	interval := math.Max(1, flags.Interval)
+	historyInterval := math.Max(1, flags.HistoryInterval)
 
 	dataTicker := time.NewTicker(time.Duration(interval * float64(time.Second)))
 	defer dataTicker.Stop()
+	historyTicker := time.NewTicker(time.Duration(historyInterval * float64(time.Second)))
+	defer historyTicker.Stop()
 
 	heartbeatTicker := time.NewTicker(30 * time.Second)
 	defer heartbeatTicker.Stop()
@@ -53,6 +57,7 @@ func EstablishWebSocketConnection() {
 	nextProtocol := requestedProtocolVersion()
 	activeProtocol := 0
 	var readDone <-chan struct{}
+	var latestReport []byte
 
 	for {
 		select {
@@ -93,7 +98,7 @@ func EstablishWebSocketConnection() {
 					if connectProtocol < 2 {
 						return
 					}
-					conn, err = runPostFallback(buildWebSocketEndpoint(connectProtocol), interval)
+					conn, err = runPostFallback(buildWebSocketEndpoint(connectProtocol), interval, historyInterval)
 					if err != nil {
 						if connectProtocol >= 2 && isV2ProtocolFailure(err) {
 							log.Printf("v2 POST fallback failed (%v), falling back to v1 until this connection is lost", err)
@@ -115,6 +120,7 @@ func EstablishWebSocketConnection() {
 			}
 
 			data := monitoring.GenerateReport()
+			latestReport = append(latestReport[:0], data...)
 			var ackIDs []string
 			if activeProtocol >= 2 {
 				ackIDs = snapshotV2AckEventIDs()
@@ -134,6 +140,24 @@ func EstablishWebSocketConnection() {
 			}
 			if activeProtocol >= 2 {
 				clearV2AckEventIDs(ackIDs)
+			}
+		case <-historyTicker.C:
+			if conn == nil || len(latestReport) == 0 {
+				continue
+			}
+			data := v1.BuildHistoryReportPayload(latestReport)
+			if activeProtocol >= 2 {
+				data = v2.BuildHistoryReportPayload(latestReport)
+			}
+			if err = conn.WriteMessage(websocket.TextMessage, data); err != nil {
+				log.Println("Failed to send history report:", err)
+				conn.Close()
+				conn = nil
+				readDone = nil
+				resetConnectionProtocolVersion()
+				if requestedProtocolVersion() >= 2 {
+					nextProtocol = 2
+				}
 			}
 		case <-heartbeatTicker.C:
 			if conn != nil {
@@ -180,7 +204,7 @@ func buildWebSocketEndpoint(protocolVersion int) string {
 	return websocketEndpoint
 }
 
-func runPostFallback(websocketEndpoint string, interval float64) (*ws.SafeConn, error) {
+func runPostFallback(websocketEndpoint string, interval, historyInterval float64) (*ws.SafeConn, error) {
 	log.Println("Entering v2 POST fallback mode")
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
@@ -189,15 +213,19 @@ func runPostFallback(websocketEndpoint string, interval float64) (*ws.SafeConn, 
 
 	reportTicker := time.NewTicker(time.Duration(interval * float64(time.Second)))
 	defer reportTicker.Stop()
+	historyTicker := time.NewTicker(time.Duration(historyInterval * float64(time.Second)))
+	defer historyTicker.Stop()
 	reconnectTicker := time.NewTicker(time.Duration(flags.ReconnectInterval) * time.Second)
 	defer reconnectTicker.Stop()
+	var latestReport []byte
 
 	for {
 		select {
 		case <-reportTicker.C:
 			reportID := fmt.Sprintf("report-%d", time.Now().UnixNano())
 			ackIDs := snapshotV2AckEventIDs()
-			resp, err := postV2Request(v2.BuildReportRequest(reportID, monitoring.GenerateReport(), ackIDs))
+			latestReport = monitoring.GenerateReport()
+			resp, err := postV2Request(v2.BuildReportRequest(reportID, latestReport, ackIDs))
 			if err != nil {
 				if shouldFallbackToV1(2, err) {
 					return nil, err
@@ -207,6 +235,17 @@ func runPostFallback(websocketEndpoint string, interval float64) (*ws.SafeConn, 
 			}
 			clearV2AckEventIDs(ackIDs)
 			processV2ResponseEvents(resp)
+		case <-historyTicker.C:
+			if len(latestReport) == 0 {
+				continue
+			}
+			reportID := fmt.Sprintf("history-%d", time.Now().UnixNano())
+			if _, err := postV2Request(v2.BuildHistoryReportRequest(reportID, latestReport)); err != nil {
+				if shouldFallbackToV1(2, err) {
+					return nil, err
+				}
+				log.Println("Failed to POST v2 history report:", err)
+			}
 		case <-reconnectTicker.C:
 			conn, err := connectWebSocket(websocketEndpoint)
 			if err == nil {

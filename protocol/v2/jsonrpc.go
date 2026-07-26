@@ -10,6 +10,7 @@ import (
 const (
 	Version               = "2.0"
 	MethodAgentReport     = "agent.report"
+	MethodAgentHistory    = "agent.historyReport"
 	MethodAgentBasicInfo  = "agent.basicInfo"
 	MethodAgentPingResult = "agent.pingResult"
 	MethodAgentTaskResult = "agent.taskResult"
@@ -74,6 +75,14 @@ func BuildReportRequest(id interface{}, report v1.ReportPayload, ackEventIDs []s
 	return NewRequest(id, MethodAgentReport, reportParams{Report: json.RawMessage(report), AckEventIDs: ackEventIDs})
 }
 
+func BuildHistoryReportPayload(report v1.ReportPayload) []byte {
+	return NewNotification(MethodAgentHistory, reportParams{Report: json.RawMessage(report)})
+}
+
+func BuildHistoryReportRequest(id interface{}, report v1.ReportPayload) []byte {
+	return NewRequest(id, MethodAgentHistory, reportParams{Report: json.RawMessage(report)})
+}
+
 func BuildBasicInfoPayload(info map[string]interface{}) []byte {
 	return NewNotification(MethodAgentBasicInfo, map[string]interface{}{"info": info})
 }
@@ -83,13 +92,12 @@ type reportParams struct {
 	AckEventIDs []string        `json:"ack_event_ids,omitempty"`
 }
 
-func BuildPingResultPayload(taskID uint, pingType string, value int, finishedAt time.Time) interface{} {
+func BuildPingResultPayload(taskID uint, value int, finishedAt time.Time) interface{} {
 	return Request{
 		JSONRPC: Version,
 		Method:  MethodAgentPingResult,
 		Params: map[string]interface{}{
 			"task_id":     taskID,
-			"ping_type":   pingType,
 			"value":       value,
 			"finished_at": finishedAt.Format(time.RFC3339Nano),
 		},

@@ -14,11 +14,11 @@ import (
 	"strings"
 	"syscall"
 
+	"github.com/spf13/cobra"
 	"monitor-agent/dnsresolver"
 	"monitor-agent/monitoring/netstatic"
 	monitoring "monitor-agent/monitoring/unit"
 	"monitor-agent/server"
-	"github.com/spf13/cobra"
 
 	pkg_flags "monitor-agent/cmd/flags"
 )
@@ -43,6 +43,15 @@ var RootCmd = &cobra.Command{
 		}
 		if flags.ProtocolVersion == 0 {
 			flags.ProtocolVersion = 2
+		}
+		if flags.Interval <= 0 {
+			return fmt.Errorf("invalid --interval value %v: expected a number greater than 0", flags.Interval)
+		}
+		if flags.HistoryInterval < 1 || flags.HistoryInterval > 60 {
+			return fmt.Errorf("invalid --history-interval value %v: expected 1 to 60 seconds", flags.HistoryInterval)
+		}
+		if flags.HistoryInterval < flags.Interval {
+			return fmt.Errorf("invalid --history-interval value %v: it cannot be shorter than --interval %v", flags.HistoryInterval, flags.Interval)
 		}
 		if flags.PreferIPVersion != "" && flags.PreferIPVersion != "4" && flags.PreferIPVersion != "6" {
 			return fmt.Errorf("invalid --prefer-ip-version value %q: expected 4 or 6", flags.PreferIPVersion)
@@ -154,6 +163,7 @@ func init() {
 	RootCmd.PersistentFlags().BoolVar(&flags.DisableWebSsh, "disable-web-ssh", false, "Disable remote control(web ssh and rce)")
 	//RootCmd.PersistentFlags().BoolVar(&flags.MemoryModeAvailable, "memory-mode-available", false, "[deprecated]Report memory as available instead of used.")
 	RootCmd.PersistentFlags().Float64VarP(&flags.Interval, "interval", "i", 1.0, "Interval in seconds")
+	RootCmd.PersistentFlags().Float64Var(&flags.HistoryInterval, "history-interval", 5.0, "History chart report interval in seconds (1-60)")
 	RootCmd.PersistentFlags().BoolVarP(&flags.IgnoreUnsafeCert, "ignore-unsafe-cert", "u", false, "Ignore unsafe certificate errors")
 	RootCmd.PersistentFlags().IntVarP(&flags.MaxRetries, "max-retries", "r", 3, "Maximum number of retries")
 	RootCmd.PersistentFlags().IntVarP(&flags.ReconnectInterval, "reconnect-interval", "c", 5, "Reconnect interval in seconds")

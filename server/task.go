@@ -383,13 +383,12 @@ func NewPingTask(conn *ws.SafeConn, protocolVersion int, taskID uint, pingType, 
 	payload := map[string]interface{}{
 		"type":        "ping_result",
 		"task_id":     taskID,
-		"ping_type":   pingType,
 		"value":       pingResult,
 		"finished_at": finishedAt,
 	}
 	var wsPayload interface{} = payload
 	if protocolVersion >= 2 {
-		wsPayload = v2.BuildPingResultPayload(taskID, pingType, pingResult, finishedAt)
+		wsPayload = v2.BuildPingResultPayload(taskID, pingResult, finishedAt)
 	}
 
 	// -1 代表丢包，服务端计算

@@ -51,7 +51,6 @@ type gpuModelsReport struct {
 }
 
 type gpuReport struct {
-	Count        int               `json:"count"`
 	AverageUsage float64           `json:"average_usage"`
 	DetailedInfo []gpuDeviceReport `json:"detailed_info"`
 }
@@ -131,7 +130,7 @@ func GenerateReport() []byte {
 			}
 
 			avgGPUUsage := totalGPUUsage / float64(len(gpuInfo))
-			data.GPU = gpuReport{Count: len(gpuInfo), AverageUsage: avgGPUUsage, DetailedInfo: gpuData}
+			data.GPU = gpuReport{AverageUsage: avgGPUUsage, DetailedInfo: gpuData}
 		}
 	}
 	// 基础模式下，GPU信息已在basicInfo中处理

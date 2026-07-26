@@ -8,6 +8,7 @@ type Config struct {
 	Token                string  `json:"token" env:"AGENT_TOKEN"`                                     // Token
 	Endpoint             string  `json:"endpoint" env:"AGENT_ENDPOINT"`                               // 面板地址
 	Interval             float64 `json:"interval" env:"AGENT_INTERVAL"`                               // 数据采集间隔，单位秒
+	HistoryInterval      float64 `json:"history_interval" env:"AGENT_HISTORY_INTERVAL"`               // 历史图采样间隔，单位秒
 	IgnoreUnsafeCert     bool    `json:"ignore_unsafe_cert" env:"AGENT_IGNORE_UNSAFE_CERT"`           // 忽略不安全的证书
 	MaxRetries           int     `json:"max_retries" env:"AGENT_MAX_RETRIES"`                         // 最大重试次数
 	ReconnectInterval    int     `json:"reconnect_interval" env:"AGENT_RECONNECT_INTERVAL"`           // 重连间隔，单位秒
