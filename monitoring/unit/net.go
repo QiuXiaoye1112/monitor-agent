@@ -10,9 +10,9 @@ import (
 	"sync"
 	"time"
 
+	"github.com/shirou/gopsutil/v4/net"
 	"monitor-agent/monitoring/netstatic"
 	"monitor-agent/utils"
-	"github.com/shirou/gopsutil/v4/net"
 )
 
 func ConnectionsCount() (tcpCount, udpCount int, err error) {
@@ -222,24 +222,14 @@ func NetworkSpeed() (totalUp, totalDown, upSpeed, downSpeed uint64, err error) {
 
 	// 如果设置了月重置（非0），统计totalUp、totalDown
 	if flags.MonthRotate != 0 {
-		netstatic.StartOrContinue() // 确保netstatic在运行
-		now := uint64(time.Now().Unix())
-		resetDay := uint64(utils.GetLastResetDate(flags.MonthRotate, time.Now()).Unix())
-		nicStatics, err := netstatic.GetTotalTrafficBetween(resetDay, now)
+		totalUp, totalDown, err = networkTotals(false, includeNics, excludeNics)
 		if err != nil {
 			// 如果netstatic失败，回退到原来的方法，并返回额外的错误信息
 			fallbackUp, fallbackDown, fallbackUpSpeed, fallbackDownSpeed, fallbackErr := getNetworkSpeedFallback(includeNics, excludeNics)
 			if fallbackErr != nil {
-				return fallbackUp, fallbackDown, fallbackUpSpeed, fallbackDownSpeed, fmt.Errorf("failed to call GetTotalTrafficBetween: %v; fallback error: %w", err, fallbackErr)
+				return fallbackUp, fallbackDown, fallbackUpSpeed, fallbackDownSpeed, fmt.Errorf("failed to collect monthly traffic: %v; fallback error: %w", err, fallbackErr)
 			}
-			return fallbackUp, fallbackDown, fallbackUpSpeed, fallbackDownSpeed, fmt.Errorf("failed to call GetTotalTrafficBetween: %w", err)
-		}
-
-		for interfaceName, stats := range nicStatics {
-			if shouldInclude(interfaceName, includeNics, excludeNics) {
-				totalUp += stats.Tx
-				totalDown += stats.Rx
-			}
+			return fallbackUp, fallbackDown, fallbackUpSpeed, fallbackDownSpeed, fmt.Errorf("failed to collect monthly traffic: %w", err)
 		}
 
 		// 对于实时速度，仍然使用网卡累计计数器差值
@@ -253,6 +243,41 @@ func NetworkSpeed() (totalUp, totalDown, upSpeed, downSpeed uint64, err error) {
 
 	// 如果没有设置月重置，使用原来的方法
 	return getNetworkSpeedFallback(includeNics, excludeNics)
+}
+
+// NetworkTotalsSnapshot returns the same cumulative counters used by regular
+// reports, but forces the monthly sampler to the current instant when enabled.
+func NetworkTotalsSnapshot() (totalUp, totalDown uint64, err error) {
+	return networkTotals(
+		true,
+		parseNics(flags.IncludeNics),
+		parseNics(flags.ExcludeNics),
+	)
+}
+
+func networkTotals(forceSample bool, includeNics, excludeNics map[string]struct{}) (totalUp, totalDown uint64, err error) {
+	if flags.MonthRotate == 0 {
+		return collectNetworkTotals(includeNics, excludeNics)
+	}
+	if err := netstatic.StartOrContinue(); err != nil {
+		return 0, 0, err
+	}
+	if forceSample {
+		netstatic.SampleNow()
+	}
+	now := uint64(time.Now().Unix())
+	resetDay := uint64(utils.GetLastResetDate(flags.MonthRotate, time.Now()).Unix())
+	nicStatics, err := netstatic.GetTotalTrafficBetween(resetDay, now)
+	if err != nil {
+		return 0, 0, err
+	}
+	for interfaceName, stats := range nicStatics {
+		if shouldInclude(interfaceName, includeNics, excludeNics) {
+			totalUp += stats.Tx
+			totalDown += stats.Rx
+		}
+	}
+	return totalUp, totalDown, nil
 }
 
 func getNetworkSpeedFallback(includeNics, excludeNics map[string]struct{}) (totalUp, totalDown, upSpeed, downSpeed uint64, err error) {

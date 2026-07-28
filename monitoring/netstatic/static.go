@@ -319,6 +319,16 @@ func StartOrContinue() error {
 	return nil
 }
 
+// SampleNow records an immediate counter delta. It is used by strict traffic
+// clearing so the returned monthly total has an exact boundary instead of
+// waiting for the next periodic two-second sample.
+func SampleNow() {
+	mu.Lock()
+	defer mu.Unlock()
+	ensureInitLocked()
+	sampleOnceLocked()
+}
+
 // Clear 清除所有流量统计数据
 func Clear() error {
 	mu.Lock()

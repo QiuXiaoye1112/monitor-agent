@@ -8,19 +8,21 @@ import (
 )
 
 const (
-	Version               = "2.0"
-	MethodAgentReport     = "agent.report"
-	MethodAgentHistory    = "agent.historyReport"
-	MethodAgentBasicInfo  = "agent.basicInfo"
-	MethodAgentPingResult = "agent.pingResult"
-	MethodAgentTaskResult = "agent.taskResult"
-	MethodAgentExec       = "agent.exec"
-	MethodAgentPing       = "agent.ping"
-	MethodAgentMessage    = "agent.message"
-	MethodAgentEvent      = "agent.event"
-	MethodAgentTerminal   = "agent.terminal.request"
-	MethodAgentFile       = "agent.file.request"
-	MethodAgentPull       = "agent.pull"
+	Version                          = "2.0"
+	MethodAgentReport                = "agent.report"
+	MethodAgentHistory               = "agent.historyReport"
+	MethodAgentBasicInfo             = "agent.basicInfo"
+	MethodAgentPingResult            = "agent.pingResult"
+	MethodAgentTaskResult            = "agent.taskResult"
+	MethodAgentExec                  = "agent.exec"
+	MethodAgentPing                  = "agent.ping"
+	MethodAgentMessage               = "agent.message"
+	MethodAgentEvent                 = "agent.event"
+	MethodAgentTerminal              = "agent.terminal.request"
+	MethodAgentFile                  = "agent.file.request"
+	MethodAgentPull                  = "agent.pull"
+	MethodAgentTrafficSnapshot       = "agent.trafficSnapshot"
+	MethodAgentTrafficSnapshotResult = "agent.trafficSnapshotResult"
 )
 
 type Request struct {
@@ -55,6 +57,17 @@ type Event struct {
 type EventResult struct {
 	Status string  `json:"status,omitempty"`
 	Events []Event `json:"events,omitempty"`
+}
+
+type TrafficSnapshotParams struct {
+	OperationID string `json:"operation_id"`
+}
+
+type TrafficSnapshotResultParams struct {
+	OperationID string `json:"operation_id"`
+	CapturedAt  string `json:"captured_at"`
+	TotalUp     int64  `json:"total_up"`
+	TotalDown   int64  `json:"total_down"`
 }
 
 func NewNotification(method string, params interface{}) []byte {

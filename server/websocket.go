@@ -26,10 +26,11 @@ import (
 )
 
 var (
-	v2AckMu       sync.Mutex
-	v2AckEventIDs []string
-	v2SeenEvents  = make(map[string]struct{})
-	v2SeenOrder   []string
+	v2AckMu                 sync.Mutex
+	v2AckEventIDs           []string
+	v2SeenEvents            = make(map[string]struct{})
+	v2SeenOrder             []string
+	trafficReportBoundaryMu sync.Mutex
 )
 
 const maxRememberedV2Events = 1024
@@ -119,6 +120,7 @@ func EstablishWebSocketConnection() {
 				}
 			}
 
+			trafficReportBoundaryMu.Lock()
 			data := monitoring.GenerateReport()
 			latestReport = append(latestReport[:0], data...)
 			var ackIDs []string
@@ -127,6 +129,10 @@ func EstablishWebSocketConnection() {
 				data = v2.BuildReportPayload(data, ackIDs)
 			}
 			err = conn.WriteMessage(websocket.TextMessage, data)
+			if err == nil && activeProtocol >= 2 {
+				clearV2AckEventIDs(ackIDs)
+			}
+			trafficReportBoundaryMu.Unlock()
 			if err != nil {
 				log.Println("Failed to send WebSocket message:", err)
 				conn.Close()
@@ -137,9 +143,6 @@ func EstablishWebSocketConnection() {
 					nextProtocol = 2
 				}
 				continue
-			}
-			if activeProtocol >= 2 {
-				clearV2AckEventIDs(ackIDs)
 			}
 		case <-historyTicker.C:
 			if conn == nil || len(latestReport) == 0 {
@@ -222,10 +225,15 @@ func runPostFallback(websocketEndpoint string, interval, historyInterval float64
 	for {
 		select {
 		case <-reportTicker.C:
+			trafficReportBoundaryMu.Lock()
 			reportID := fmt.Sprintf("report-%d", time.Now().UnixNano())
 			ackIDs := snapshotV2AckEventIDs()
 			latestReport = monitoring.GenerateReport()
 			resp, err := postV2Request(v2.BuildReportRequest(reportID, latestReport, ackIDs))
+			if err == nil {
+				clearV2AckEventIDs(ackIDs)
+			}
+			trafficReportBoundaryMu.Unlock()
 			if err != nil {
 				if shouldFallbackToV1(2, err) {
 					return nil, err
@@ -233,7 +241,6 @@ func runPostFallback(websocketEndpoint string, interval, historyInterval float64
 				log.Println("Failed to POST v2 report:", err)
 				continue
 			}
-			clearV2AckEventIDs(ackIDs)
 			processV2ResponseEvents(resp)
 		case <-historyTicker.C:
 			if len(latestReport) == 0 {
@@ -530,6 +537,39 @@ func processV2Event(conn *ws.SafeConn, method string, params interface{}, eventI
 		} else {
 			log.Printf("bad v2 file params: %v", err)
 		}
+	case v2.MethodAgentTrafficSnapshot:
+		var p v2.TrafficSnapshotParams
+		if err := v2.BindParams(params, &p); err != nil || p.OperationID == "" {
+			log.Printf("bad v2 traffic snapshot params: %v", err)
+			return false
+		}
+		trafficReportBoundaryMu.Lock()
+		snapshot, err := monitoring.GenerateTrafficSnapshot()
+		if err != nil {
+			trafficReportBoundaryMu.Unlock()
+			log.Printf("failed to capture traffic snapshot: %v", err)
+			forgetV2EventSeen(eventID)
+			return false
+		}
+		result := v2.TrafficSnapshotResultParams{
+			OperationID: p.OperationID,
+			CapturedAt:  snapshot.CapturedAt.Format(time.RFC3339Nano),
+			TotalUp:     snapshot.TotalUp,
+			TotalDown:   snapshot.TotalDown,
+		}
+		payload := v2.NewNotification(v2.MethodAgentTrafficSnapshotResult, result)
+		if conn != nil {
+			err = conn.WriteMessage(websocket.TextMessage, payload)
+		} else {
+			_, err = postV2Request(payload)
+		}
+		trafficReportBoundaryMu.Unlock()
+		if err != nil {
+			log.Printf("failed to return traffic snapshot: %v", err)
+			forgetV2EventSeen(eventID)
+			return false
+		}
+		return true
 	case v2.MethodAgentMessage, v2.MethodAgentEvent:
 		log.Printf("received v2 %s: %+v", method, params)
 		return true
@@ -537,6 +577,22 @@ func processV2Event(conn *ws.SafeConn, method string, params interface{}, eventI
 		log.Printf("unknown v2 event method %s", method)
 	}
 	return false
+}
+
+func forgetV2EventSeen(id string) {
+	if id == "" {
+		return
+	}
+	v2AckMu.Lock()
+	defer v2AckMu.Unlock()
+	delete(v2SeenEvents, id)
+	filtered := v2SeenOrder[:0]
+	for _, seenID := range v2SeenOrder {
+		if seenID != id {
+			filtered = append(filtered, seenID)
+		}
+	}
+	v2SeenOrder = filtered
 }
 
 // connectWebSocket attempts to establish a WebSocket connection and upload basic info

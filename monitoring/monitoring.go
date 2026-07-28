@@ -4,6 +4,8 @@ import (
 	"encoding/json"
 	"fmt"
 	"log"
+	"math"
+	"time"
 
 	pkg_flags "monitor-agent/cmd/flags"
 	unit "monitor-agent/monitoring/unit"
@@ -44,6 +46,27 @@ type networkReport struct {
 type connectionsReport struct {
 	TCP int `json:"tcp"`
 	UDP int `json:"udp"`
+}
+
+type TrafficSnapshot struct {
+	CapturedAt time.Time
+	TotalUp    int64
+	TotalDown  int64
+}
+
+func GenerateTrafficSnapshot() (TrafficSnapshot, error) {
+	totalUp, totalDown, err := unit.NetworkTotalsSnapshot()
+	if err != nil {
+		return TrafficSnapshot{}, err
+	}
+	if totalUp > math.MaxInt64 || totalDown > math.MaxInt64 {
+		return TrafficSnapshot{}, fmt.Errorf("network counter exceeds int64")
+	}
+	return TrafficSnapshot{
+		CapturedAt: time.Now(),
+		TotalUp:    int64(totalUp),
+		TotalDown:  int64(totalDown),
+	}, nil
 }
 
 type gpuModelsReport struct {
