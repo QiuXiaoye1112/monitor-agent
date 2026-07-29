@@ -7,11 +7,8 @@ import (
 	"math"
 	"time"
 
-	pkg_flags "monitor-agent/cmd/flags"
 	unit "monitor-agent/monitoring/unit"
 )
-
-var flags = pkg_flags.GlobalConfig
 
 type report struct {
 	CPU         cpuReport         `json:"cpu"`
@@ -21,7 +18,6 @@ type report struct {
 	Disk        usageReport       `json:"disk"`
 	Network     networkReport     `json:"network"`
 	Connections connectionsReport `json:"connections"`
-	GPU         interface{}       `json:"gpu,omitempty"`
 	Uptime      uint64            `json:"uptime"`
 	Process     int               `json:"process"`
 	Message     string            `json:"message"`
@@ -69,23 +65,6 @@ func GenerateTrafficSnapshot() (TrafficSnapshot, error) {
 	}, nil
 }
 
-type gpuModelsReport struct {
-	Models []string `json:"models"`
-}
-
-type gpuReport struct {
-	AverageUsage float64           `json:"average_usage"`
-	DetailedInfo []gpuDeviceReport `json:"detailed_info"`
-}
-
-type gpuDeviceReport struct {
-	Name        string  `json:"name"`
-	MemoryTotal uint64  `json:"memory_total"`
-	MemoryUsed  uint64  `json:"memory_used"`
-	Utilization float64 `json:"utilization"`
-	Temperature uint64  `json:"temperature"`
-}
-
 func GenerateReport() []byte {
 	message := ""
 	data := report{}
@@ -124,39 +103,6 @@ func GenerateReport() []byte {
 	data.Uptime = uptime
 
 	data.Process = unit.ProcessCount()
-
-	// GPU监控 - 根据标志决定详细程度
-	if flags.EnableGPU {
-		// 详细GPU监控模式
-		gpuInfo, err := unit.GetDetailedGPUInfo()
-		if err != nil {
-			message += fmt.Sprintf("failed to get detailed GPU info: %v\n", err)
-			// 降级到基础GPU信息
-			gpuNames, nameErr := unit.GetDetailedGPUHost()
-			if nameErr == nil && len(gpuNames) > 0 {
-				data.GPU = gpuModelsReport{Models: gpuNames}
-			}
-		} else if len(gpuInfo) > 0 {
-			// 成功获取详细信息
-			gpuData := make([]gpuDeviceReport, len(gpuInfo))
-			totalGPUUsage := 0.0
-
-			for i, info := range gpuInfo {
-				gpuData[i] = gpuDeviceReport{
-					Name:        info.Name,
-					MemoryTotal: info.MemoryTotal,
-					MemoryUsed:  info.MemoryUsed,
-					Utilization: info.Utilization,
-					Temperature: info.Temperature,
-				}
-				totalGPUUsage += info.Utilization
-			}
-
-			avgGPUUsage := totalGPUUsage / float64(len(gpuInfo))
-			data.GPU = gpuReport{AverageUsage: avgGPUUsage, DetailedInfo: gpuData}
-		}
-	}
-	// 基础模式下，GPU信息已在basicInfo中处理
 
 	data.Message = message
 

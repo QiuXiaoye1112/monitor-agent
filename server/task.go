@@ -2,10 +2,10 @@ package server
 
 import (
 	"bytes"
-	"compress/gzip"
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"log"
 	"net"
@@ -156,23 +156,47 @@ func appendErrorResult(result, err string) string {
 }
 
 func uploadTaskResult(taskID, result string, exitCode int, finishedAt time.Time) {
+	pending := pendingResult{
+		kind:       pendingTaskResult,
+		taskID:     taskID,
+		taskOutput: result,
+		exitCode:   exitCode,
+		finishedAt: finishedAt,
+	}
+	reportContext, ok := monitorServiceHealth.context()
+	if !ok {
+		enqueuePendingResult(pending)
+		return
+	}
+	if err := sendTaskResult(reportContext, pending); err != nil {
+		log.Printf("Failed to upload task result; queued for recovery: %v", err)
+		enqueuePendingResult(pending)
+	}
+}
+
+func sendTaskResult(ctx context.Context, pending pendingResult) error {
 	payload := map[string]interface{}{
-		"task_id":     taskID,
-		"result":      result,
-		"exit_code":   exitCode,
-		"finished_at": finishedAt,
+		"task_id":     pending.taskID,
+		"result":      pending.taskOutput,
+		"exit_code":   pending.exitCode,
+		"finished_at": pending.finishedAt,
 	}
 
-	jsonData, _ := json.Marshal(payload)
+	jsonData, err := json.Marshal(payload)
+	if err != nil {
+		return err
+	}
 	endpoint := strings.TrimSuffix(flags.Endpoint, "/") + "/api/clients/task/result?token=" + flags.Token
 
 	client := dnsresolver.GetHTTPClientWithPreference(30*time.Second, flags.PreferIPVersion)
-	maxRetry := flags.MaxRetries
+	maxRetry := max(0, flags.MaxRetries)
 	for attempt := 0; attempt <= maxRetry; attempt++ {
-		req, err := http.NewRequest("POST", endpoint, bytes.NewReader(jsonData))
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		req, err := http.NewRequestWithContext(ctx, "POST", endpoint, bytes.NewReader(jsonData))
 		if err != nil {
-			log.Printf("Failed to create task result request: %v", err)
-			return
+			return err
 		}
 		req.Header.Set("Content-Type", "application/json")
 		if flags.CFAccessClientID != "" && flags.CFAccessClientSecret != "" {
@@ -186,19 +210,26 @@ func uploadTaskResult(taskID, result string, exitCode int, finishedAt time.Time)
 			_ = resp.Body.Close()
 		}
 		if err == nil && resp != nil && resp.StatusCode == http.StatusOK {
-			return
+			return nil
 		}
 		if attempt == maxRetry {
 			if err != nil {
-				log.Printf("Failed to upload task result: %v", err)
+				return err
 			} else if resp != nil {
-				log.Printf("Failed to upload task result: %s", resp.Status)
+				return fmt.Errorf("task result endpoint returned %s", resp.Status)
 			}
-			return
+			return errors.New("task result endpoint returned no response")
 		}
 		log.Printf("Failed to upload task result, retrying %d/%d", attempt+1, maxRetry)
-		time.Sleep(2 * time.Second)
+		retryTimer := time.NewTimer(2 * time.Second)
+		select {
+		case <-ctx.Done():
+			retryTimer.Stop()
+			return ctx.Err()
+		case <-retryTimer.C:
+		}
 	}
+	return nil
 }
 
 // resolveIP 解析域名到 IP 地址，排除 DNS 查询时间
@@ -391,72 +422,19 @@ func NewPingTask(conn *ws.SafeConn, protocolVersion int, taskID uint, pingType, 
 		wsPayload = v2.BuildPingResultPayload(taskID, pingResult, finishedAt)
 	}
 
-	// -1 代表丢包，服务端计算
-	//if pingResult == -1 {
-	//	return
-	//}
-	if conn == nil {
-		if protocolVersion >= 2 {
-			if err := postV2RPC(wsPayload); err != nil {
-				log.Printf("Failed to upload ping result over POST: %v", err)
-			}
-		}
+	pending := pendingResult{
+		kind:       pendingPingResult,
+		pingTaskID: taskID,
+		pingValue:  pingResult,
+		finishedAt: finishedAt,
+	}
+	if !monitorServiceHealth.canReport() || conn == nil {
+		enqueuePendingResult(pending)
 		return
 	}
 	if err := conn.WriteJSON(wsPayload); err != nil {
-		log.Printf("Failed to write JSON to WebSocket: %v", err)
+		log.Printf("Failed to write ping result; queued for recovery: %v", err)
+		enqueuePendingResult(pending)
 	}
 
-}
-
-func postV2RPC(payload interface{}) error {
-	body, err := json.Marshal(payload)
-	if err != nil {
-		return err
-	}
-	endpoint := strings.TrimSuffix(flags.Endpoint, "/") + "/api/clients/v2/rpc?token=" + flags.Token
-	compressed := false
-	if !flags.DisableCompression {
-		if gz, err := gzipBytes(body); err == nil {
-			body = gz
-			compressed = true
-		}
-	}
-	req, err := http.NewRequest("POST", endpoint, bytes.NewReader(body))
-	if err != nil {
-		return err
-	}
-	req.Header.Set("Content-Type", "application/json")
-	if compressed {
-		req.Header.Set("Content-Encoding", "gzip")
-	}
-	if flags.CFAccessClientID != "" && flags.CFAccessClientSecret != "" {
-		req.Header.Set("CF-Access-Client-Id", flags.CFAccessClientID)
-		req.Header.Set("CF-Access-Client-Secret", flags.CFAccessClientSecret)
-	}
-	client := dnsresolver.GetHTTPClientWithPreference(30*time.Second, flags.PreferIPVersion)
-	resp, err := client.Do(req)
-	if err != nil {
-		return err
-	}
-	defer resp.Body.Close()
-	if resp.StatusCode != http.StatusOK {
-		body, _ := io.ReadAll(resp.Body)
-		return &httpStatusError{StatusCode: resp.StatusCode, Status: resp.Status, Body: string(body)}
-	}
-	_, _ = io.Copy(io.Discard, resp.Body)
-	return nil
-}
-
-func gzipBytes(data []byte) ([]byte, error) {
-	var buf bytes.Buffer
-	zw := gzip.NewWriter(&buf)
-	if _, err := zw.Write(data); err != nil {
-		_ = zw.Close()
-		return nil, err
-	}
-	if err := zw.Close(); err != nil {
-		return nil, err
-	}
-	return buf.Bytes(), nil
 }

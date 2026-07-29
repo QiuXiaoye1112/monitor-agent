@@ -2,11 +2,14 @@ package monitoring
 
 import (
 	"context"
+	"errors"
+	"fmt"
 	"io"
 	"log"
 	"net"
 	"net/http"
 	"regexp"
+	"strings"
 	"time"
 
 	"monitor-agent/dnsresolver"
@@ -46,7 +49,10 @@ var (
 )
 
 func GetIPv4Address() (string, error) {
+	return GetIPv4AddressContext(context.Background())
+}
 
+func GetIPv4AddressContext(ctx context.Context) (string, error) {
 	webAPIs := []string{
 		"https://www.visa.cn/cdn-cgi/trace",
 		"https://www.qualcomm.cn/cdn-cgi/trace",
@@ -57,20 +63,23 @@ func GetIPv4Address() (string, error) {
 		"https://api.ipify.org?format=json",
 	}
 
+	var lastErr error
 	for _, api := range webAPIs {
-		// get ipv4
-		req, err := http.NewRequest("GET", api, nil)
+		req, err := http.NewRequestWithContext(ctx, "GET", api, nil)
 		if err != nil {
+			lastErr = err
 			continue
 		}
 		req.Header.Set("User-Agent", userAgent)
 		resp, err := ipv4HTTPClient.Do(req)
 		if err != nil {
+			lastErr = err
 			continue
 		}
 		body, err := io.ReadAll(resp.Body)
 		_ = resp.Body.Close() // 获取后立即关闭防止堵塞
 		if err != nil {
+			lastErr = err
 			continue
 		}
 		re := regexp.MustCompile(`\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}`)
@@ -79,12 +88,19 @@ func GetIPv4Address() (string, error) {
 			log.Printf("Get IPV4 Success: %s", ipv4)
 			return ipv4, nil
 		}
+		lastErr = errors.New("IPv4 provider returned no address")
 	}
-	return "", nil
+	if lastErr == nil {
+		lastErr = errors.New("no IPv4 providers configured")
+	}
+	return "", fmt.Errorf("failed to discover public IPv4 address: %w", lastErr)
 }
 
 func GetIPv6Address() (string, error) {
+	return GetIPv6AddressContext(context.Background())
+}
 
+func GetIPv6AddressContext(ctx context.Context) (string, error) {
 	webAPIs := []string{
 		"https://v6.ip.zxinc.org/info.php?type=json",
 		"https://api6.ipify.org?format=json",
@@ -92,20 +108,23 @@ func GetIPv6Address() (string, error) {
 		"http://api-ipv6.ip.sb/geoip",
 	}
 
+	var lastErr error
 	for _, api := range webAPIs {
-		// get ipv6
-		req, err := http.NewRequest("GET", api, nil)
+		req, err := http.NewRequestWithContext(ctx, "GET", api, nil)
 		if err != nil {
+			lastErr = err
 			continue
 		}
 		req.Header.Set("User-Agent", userAgent)
 		resp, err := ipv6HTTPClient.Do(req)
 		if err != nil {
+			lastErr = err
 			continue
 		}
 		body, err := io.ReadAll(resp.Body)
 		_ = resp.Body.Close() // 获取后立即关闭防止堵塞
 		if err != nil {
+			lastErr = err
 			continue
 		}
 
@@ -116,12 +135,19 @@ func GetIPv6Address() (string, error) {
 			log.Printf("Get IPV6 Success:  %s", ipv6)
 			return ipv6, nil
 		}
+		lastErr = errors.New("IPv6 provider returned no address")
 	}
-	return "", nil
+	if lastErr == nil {
+		lastErr = errors.New("no IPv6 providers configured")
+	}
+	return "", fmt.Errorf("failed to discover public IPv6 address: %w", lastErr)
 }
 
 func GetIPAddress() (ipv4, ipv6 string, err error) {
+	return GetIPAddressContext(context.Background())
+}
 
+func GetIPAddressContext(ctx context.Context) (ipv4, ipv6 string, err error) {
 	if flags.GetIpAddrFromNic {
 		allowNics, err := InterfaceList()
 		if err != nil {
@@ -137,24 +163,86 @@ func GetIPAddress() (ipv4, ipv6 string, err error) {
 
 	if flags.CustomIpv4 != "" {
 		ipv4 = flags.CustomIpv4
-	} else {
-		ipv4, err = GetIPv4Address()
-		if err != nil {
-			log.Printf("Get IPV4 Error: %v", err)
-			ipv4 = ""
-		}
 	}
 	if flags.CustomIpv6 != "" {
 		ipv6 = flags.CustomIpv6
-	} else {
-		ipv6, err = GetIPv6Address()
-		if err != nil {
-			log.Printf("Get IPV6 Error: %v", err)
-			ipv6 = ""
-		}
 	}
 
-	return ipv4, ipv6, nil
+	directIPv4, directIPv6 := getPublicIPFromInterfaces()
+	if ipv4 == "" {
+		ipv4 = directIPv4
+	}
+	if ipv6 == "" {
+		ipv6 = directIPv6
+	}
+	if ipv4 != "" || ipv6 != "" {
+		return ipv4, ipv6, nil
+	}
+
+	ipv4, err = GetIPv4AddressContext(ctx)
+	if err != nil {
+		return "", "", err
+	}
+	return ipv4, "", nil
+}
+
+func getPublicIPFromInterfaces() (ipv4, ipv6 string) {
+	interfaces, err := net.Interfaces()
+	if err != nil {
+		return "", ""
+	}
+	for _, networkInterface := range interfaces {
+		if networkInterface.Flags&net.FlagUp == 0 || isVirtualInterfaceName(networkInterface.Name) {
+			continue
+		}
+		addresses, addressErr := networkInterface.Addrs()
+		if addressErr != nil {
+			continue
+		}
+		for _, address := range addresses {
+			ip, _, parseErr := net.ParseCIDR(address.String())
+			if parseErr != nil {
+				ip = net.ParseIP(address.String())
+			}
+			if !isPublicIP(ip) {
+				continue
+			}
+			if ip.To4() != nil && ipv4 == "" {
+				ipv4 = ip.String()
+			} else if ip.To4() == nil && ipv6 == "" {
+				ipv6 = ip.String()
+			}
+		}
+	}
+	return ipv4, ipv6
+}
+
+func isVirtualInterfaceName(name string) bool {
+	name = strings.ToLower(name)
+	for _, prefix := range []string{
+		"veth",
+		"docker",
+		"br-",
+		"virbr",
+		"cni",
+		"flannel",
+		"podman",
+	} {
+		if strings.HasPrefix(name, prefix) {
+			return true
+		}
+	}
+	return false
+}
+
+func isPublicIP(ip net.IP) bool {
+	if ip == nil || !ip.IsGlobalUnicast() || ip.IsPrivate() {
+		return false
+	}
+	if ipv4 := ip.To4(); ipv4 != nil && ipv4[0] == 100 && ipv4[1]&0xc0 == 64 {
+		return false
+	}
+	return true
 }
 
 // getIPFromInterfaces 从指定的网卡接口获取 IPv4 和 IPv6 地址

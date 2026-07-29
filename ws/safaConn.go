@@ -7,6 +7,8 @@ import (
 	"github.com/gorilla/websocket"
 )
 
+const writeTimeout = 30 * time.Second
+
 type SafeConn struct {
 	conn *websocket.Conn
 	mu   sync.Mutex
@@ -22,13 +24,23 @@ func NewSafeConn(conn *websocket.Conn) *SafeConn {
 func (sc *SafeConn) WriteMessage(messageType int, data []byte) error {
 	sc.mu.Lock()
 	defer sc.mu.Unlock()
-	return sc.conn.WriteMessage(messageType, data)
+	if err := sc.conn.SetWriteDeadline(time.Now().Add(writeTimeout)); err != nil {
+		return err
+	}
+	err := sc.conn.WriteMessage(messageType, data)
+	_ = sc.conn.SetWriteDeadline(time.Time{})
+	return err
 }
 
 func (sc *SafeConn) WriteJSON(v interface{}) error {
 	sc.mu.Lock()
 	defer sc.mu.Unlock()
-	return sc.conn.WriteJSON(v)
+	if err := sc.conn.SetWriteDeadline(time.Now().Add(writeTimeout)); err != nil {
+		return err
+	}
+	err := sc.conn.WriteJSON(v)
+	_ = sc.conn.SetWriteDeadline(time.Time{})
+	return err
 }
 
 func (sc *SafeConn) Close() error {
@@ -50,6 +62,9 @@ func (sc *SafeConn) SetReadDeadline(t time.Time) error {
 	// sc.mu.Lock()
 	// defer sc.mu.Unlock()
 	return sc.conn.SetReadDeadline(t)
+}
+func (sc *SafeConn) SetPongHandler(h func(appData string) error) {
+	sc.conn.SetPongHandler(h)
 }
 func (sc *SafeConn) GetConn() *websocket.Conn {
 	sc.mu.Lock()

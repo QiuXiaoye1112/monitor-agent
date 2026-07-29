@@ -1,12 +1,9 @@
 package server
 
 import (
-	"bytes"
-	"context"
 	"crypto/tls"
 	"encoding/json"
 	"fmt"
-	"io"
 	"log"
 	"math"
 	"net/http"
@@ -33,7 +30,47 @@ var (
 	trafficReportBoundaryMu sync.Mutex
 )
 
-const maxRememberedV2Events = 1024
+const (
+	maxRememberedV2Events     = 1024
+	maxPendingInboundMessages = 128
+	heartbeatInterval         = 30 * time.Second
+	heartbeatTimeout          = 30 * time.Second
+	websocketConnectTimeout   = 30 * time.Second
+)
+
+type heartbeatPong struct {
+	payload    string
+	receivedAt time.Time
+}
+
+type websocketInboundMessage struct {
+	conn            *ws.SafeConn
+	protocolVersion int
+	payload         []byte
+}
+
+type connectionRetryState struct {
+	connectionVerified          bool
+	immediateReconnectAvailable bool
+}
+
+func (state *connectionRetryState) connected() {
+	state.connectionVerified = false
+}
+
+func (state *connectionRetryState) pongReceived() {
+	state.connectionVerified = true
+	state.immediateReconnectAvailable = true
+}
+
+func (state *connectionRetryState) connectionFailed() bool {
+	reconnectImmediately := state.connectionVerified && state.immediateReconnectAvailable
+	state.connectionVerified = false
+	if reconnectImmediately {
+		state.immediateReconnectAvailable = false
+	}
+	return reconnectImmediately
+}
 
 func EstablishWebSocketConnection() {
 	var conn *ws.SafeConn
@@ -52,74 +89,122 @@ func EstablishWebSocketConnection() {
 	historyTicker := time.NewTicker(time.Duration(historyInterval * float64(time.Second)))
 	defer historyTicker.Stop()
 
-	heartbeatTicker := time.NewTicker(30 * time.Second)
-	defer heartbeatTicker.Stop()
+	heartbeatTimer := time.NewTimer(0)
+	defer heartbeatTimer.Stop()
 
 	nextProtocol := requestedProtocolVersion()
 	activeProtocol := 0
 	var readDone <-chan struct{}
+	var pongEvents <-chan heartbeatPong
+	var pendingHeartbeat string
+	var heartbeatDeadline time.Time
 	var latestReport []byte
+	var retryState connectionRetryState
+	inboundMessages := make(chan websocketInboundMessage, maxPendingInboundMessages)
+	pendingInboundMessages := make([]websocketInboundMessage, 0, maxPendingInboundMessages)
+
+	resetHeartbeatTimer := func(delay time.Duration) {
+		if !heartbeatTimer.Stop() {
+			select {
+			case <-heartbeatTimer.C:
+			default:
+			}
+		}
+		heartbeatTimer.Reset(delay)
+	}
+
+	clearPendingHeartbeat := func() {
+		pendingHeartbeat = ""
+		heartbeatDeadline = time.Time{}
+	}
+
+	closeConnection := func() {
+		clearPendingHeartbeat()
+		if conn != nil {
+			conn.Close()
+			conn = nil
+		}
+		readDone = nil
+		pongEvents = nil
+		activeProtocol = 0
+		pendingInboundMessages = pendingInboundMessages[:0]
+		resetConnectionProtocolVersion()
+		if requestedProtocolVersion() >= 2 {
+			nextProtocol = 2
+		}
+	}
+
+	activateConnection := func(newConn *ws.SafeConn, protocolVersion int) {
+		clearPendingHeartbeat()
+		conn = newConn
+		retryState.connected()
+		activeProtocol = protocolVersion
+		nextProtocol = protocolVersion
+		setConnectionProtocolVersion(activeProtocol)
+
+		pongChannel := make(chan heartbeatPong, 4)
+		configureHeartbeat(conn, pongChannel)
+		pongEvents = pongChannel
+
+		done := make(chan struct{})
+		readDone = done
+		go handleWebSocketMessages(conn, activeProtocol, inboundMessages, done)
+	}
+
+	handleConnectionFailure := func(reason string, countMiss bool) {
+		canReconnectImmediately := retryState.connectionFailed()
+		closeConnection()
+		if canReconnectImmediately {
+			log.Printf("WebSocket disconnected (%s); attempting one immediate reconnect", reason)
+			resetHeartbeatTimer(0)
+			return
+		}
+		if countMiss {
+			recordHeartbeatMiss(reason)
+		}
+		resetHeartbeatTimer(heartbeatInterval)
+	}
+
+	processPendingInboundMessages := func() {
+		for _, inbound := range pendingInboundMessages {
+			processWebSocketMessage(inbound.conn, inbound.protocolVersion, inbound.payload)
+		}
+		pendingInboundMessages = pendingInboundMessages[:0]
+	}
+
+	acceptHeartbeatPong := func(pong heartbeatPong) bool {
+		if !isTimelyHeartbeatPong(pong, pendingHeartbeat, heartbeatDeadline) {
+			return false
+		}
+		clearPendingHeartbeat()
+		retryState.pongReceived()
+		recordHeartbeatPong()
+		flushPendingResults(conn, activeProtocol)
+		processPendingInboundMessages()
+		resetHeartbeatTimer(heartbeatInterval)
+		return true
+	}
+
+	takeQueuedTimelyPong := func() bool {
+		for pongEvents != nil {
+			select {
+			case pong := <-pongEvents:
+				if acceptHeartbeatPong(pong) {
+					return true
+				}
+			default:
+				return false
+			}
+		}
+		return false
+	}
 
 	for {
 		select {
 		case <-dataTicker.C:
-			if conn == nil {
-				log.Println("Attempting to connect to WebSocket...")
-				retry := 0
-				connectProtocol := nextProtocol
-				for retry <= flags.MaxRetries {
-					if retry > 0 {
-						log.Println("Retrying websocket connection, attempt:", retry)
-					}
-					websocketEndpoint := buildWebSocketEndpoint(connectProtocol)
-					conn, err = connectWebSocket(websocketEndpoint)
-					if err == nil {
-						activeProtocol = connectProtocol
-						nextProtocol = connectProtocol
-						setConnectionProtocolVersion(activeProtocol)
-						log.Printf("WebSocket connected using v%d protocol", activeProtocol)
-						done := make(chan struct{})
-						readDone = done
-						go handleWebSocketMessages(conn, activeProtocol, done)
-						break
-					} else if shouldFallbackToV1(connectProtocol, err) {
-						log.Printf("v2 WebSocket endpoint failed (%v), falling back to v1 until this connection is lost", err)
-						connectProtocol = 1
-						retry = 0
-						continue
-					} else {
-						log.Println("Failed to connect to WebSocket:", err)
-					}
-					retry++
-					time.Sleep(time.Duration(flags.ReconnectInterval) * time.Second)
-				}
-
-				if retry > flags.MaxRetries {
-					log.Println("Max retries reached.")
-					if connectProtocol < 2 {
-						return
-					}
-					conn, err = runPostFallback(buildWebSocketEndpoint(connectProtocol), interval, historyInterval)
-					if err != nil {
-						if connectProtocol >= 2 && isV2ProtocolFailure(err) {
-							log.Printf("v2 POST fallback failed (%v), falling back to v1 until this connection is lost", err)
-							nextProtocol = 1
-							setConnectionProtocolVersion(1)
-							continue
-						}
-						log.Println("POST fallback stopped:", err)
-						return
-					}
-					log.Println("WebSocket recovered from POST fallback")
-					activeProtocol = connectProtocol
-					nextProtocol = connectProtocol
-					setConnectionProtocolVersion(activeProtocol)
-					done := make(chan struct{})
-					readDone = done
-					go handleWebSocketMessages(conn, activeProtocol, done)
-				}
+			if conn == nil || !monitorServiceHealth.canReport() {
+				continue
 			}
-
 			trafficReportBoundaryMu.Lock()
 			data := monitoring.GenerateReport()
 			latestReport = append(latestReport[:0], data...)
@@ -135,17 +220,11 @@ func EstablishWebSocketConnection() {
 			trafficReportBoundaryMu.Unlock()
 			if err != nil {
 				log.Println("Failed to send WebSocket message:", err)
-				conn.Close()
-				conn = nil // Mark connection as dead
-				readDone = nil
-				resetConnectionProtocolVersion()
-				if requestedProtocolVersion() >= 2 {
-					nextProtocol = 2
-				}
+				handleConnectionFailure(err.Error(), true)
 				continue
 			}
 		case <-historyTicker.C:
-			if conn == nil || len(latestReport) == 0 {
+			if !monitorServiceHealth.canReport() || conn == nil || len(latestReport) == 0 {
 				continue
 			}
 			data := v1.BuildHistoryReportPayload(latestReport)
@@ -154,42 +233,88 @@ func EstablishWebSocketConnection() {
 			}
 			if err = conn.WriteMessage(websocket.TextMessage, data); err != nil {
 				log.Println("Failed to send history report:", err)
-				conn.Close()
-				conn = nil
-				readDone = nil
-				resetConnectionProtocolVersion()
-				if requestedProtocolVersion() >= 2 {
-					nextProtocol = 2
-				}
+				handleConnectionFailure(err.Error(), true)
 			}
-		case <-heartbeatTicker.C:
-			if conn != nil {
-				err := conn.WriteMessage(websocket.PingMessage, nil)
-				if err != nil {
-					log.Println("Failed to send heartbeat:", err)
-					conn.Close()
-					conn = nil // Mark connection as dead
-					readDone = nil
-					resetConnectionProtocolVersion()
-					if requestedProtocolVersion() >= 2 {
-						nextProtocol = 2
+		case <-heartbeatTimer.C:
+			missRecorded := false
+			if pendingHeartbeat != "" {
+				if takeQueuedTimelyPong() {
+					continue
+				}
+				timedOutHeartbeat := pendingHeartbeat
+				clearPendingHeartbeat()
+				recordHeartbeatMiss(fmt.Sprintf("%s did not receive Pong within %s", timedOutHeartbeat, heartbeatTimeout))
+				missRecorded = true
+			}
+			if conn == nil {
+				connectProtocol := nextProtocol
+				websocketEndpoint := buildWebSocketEndpoint(connectProtocol)
+				newConn, connectErr := connectWebSocket(websocketEndpoint)
+				if connectErr != nil && shouldFallbackToV1(connectProtocol, connectErr) {
+					connectProtocol = 1
+					websocketEndpoint = buildWebSocketEndpoint(connectProtocol)
+					newConn, connectErr = connectWebSocket(websocketEndpoint)
+				}
+				if connectErr != nil {
+					if !missRecorded {
+						recordHeartbeatMiss(connectErr.Error())
 					}
+					resetHeartbeatTimer(heartbeatInterval)
+					continue
 				}
+				activateConnection(newConn, connectProtocol)
+				log.Printf("WebSocket heartbeat probe connected using v%d protocol", activeProtocol)
 			}
+
+			payload := fmt.Sprintf("heartbeat-%d", time.Now().UnixNano())
+			if err = sendHeartbeat(conn, payload); err != nil {
+				log.Println("Failed to send heartbeat:", err)
+				handleConnectionFailure(err.Error(), !missRecorded)
+				continue
+			}
+			pendingHeartbeat = payload
+			heartbeatDeadline = time.Now().Add(heartbeatTimeout)
+			resetHeartbeatTimer(heartbeatTimeout)
+		case pong := <-pongEvents:
+			acceptHeartbeatPong(pong)
+		case inbound := <-inboundMessages:
+			if inbound.conn != conn {
+				continue
+			}
+			if monitorServiceHealth.canReport() {
+				processWebSocketMessage(inbound.conn, inbound.protocolVersion, inbound.payload)
+				continue
+			}
+			if len(pendingInboundMessages) >= maxPendingInboundMessages {
+				handleConnectionFailure("inbound event buffer is full", true)
+				continue
+			}
+			pendingInboundMessages = append(pendingInboundMessages, inbound)
 		case <-readDone:
-			log.Println("WebSocket disconnected")
-			if conn != nil {
-				conn.Close()
-				conn = nil
-			}
-			readDone = nil
-			activeProtocol = 0
-			resetConnectionProtocolVersion()
-			if requestedProtocolVersion() >= 2 {
-				nextProtocol = 2
-			}
+			handleConnectionFailure("read loop ended", true)
 		}
 	}
+}
+
+func configureHeartbeat(conn *ws.SafeConn, pongEvents chan<- heartbeatPong) {
+	conn.SetPongHandler(func(payload string) error {
+		pong := heartbeatPong{payload: payload, receivedAt: time.Now()}
+		select {
+		case pongEvents <- pong:
+		default:
+		}
+		return nil
+	})
+}
+
+func sendHeartbeat(conn *ws.SafeConn, payload string) error {
+	return conn.WriteMessage(websocket.PingMessage, []byte(payload))
+}
+
+func isTimelyHeartbeatPong(pong heartbeatPong, pendingPayload string, deadline time.Time) bool {
+	return pendingPayload != "" &&
+		pong.payload == pendingPayload &&
+		!pong.receivedAt.After(deadline)
 }
 
 func buildWebSocketEndpoint(protocolVersion int) string {
@@ -205,164 +330,6 @@ func buildWebSocketEndpoint(protocolVersion int) string {
 		log.Printf("Warning: Failed to convert WebSocket IDN to ASCII: %v", err)
 	}
 	return websocketEndpoint
-}
-
-func runPostFallback(websocketEndpoint string, interval, historyInterval float64) (*ws.SafeConn, error) {
-	log.Println("Entering v2 POST fallback mode")
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-	pullErr := make(chan error, 1)
-	go runV2PullLoop(ctx, pullErr)
-
-	reportTicker := time.NewTicker(time.Duration(interval * float64(time.Second)))
-	defer reportTicker.Stop()
-	historyTicker := time.NewTicker(time.Duration(historyInterval * float64(time.Second)))
-	defer historyTicker.Stop()
-	reconnectTicker := time.NewTicker(time.Duration(flags.ReconnectInterval) * time.Second)
-	defer reconnectTicker.Stop()
-	var latestReport []byte
-
-	for {
-		select {
-		case <-reportTicker.C:
-			trafficReportBoundaryMu.Lock()
-			reportID := fmt.Sprintf("report-%d", time.Now().UnixNano())
-			ackIDs := snapshotV2AckEventIDs()
-			latestReport = monitoring.GenerateReport()
-			resp, err := postV2Request(v2.BuildReportRequest(reportID, latestReport, ackIDs))
-			if err == nil {
-				clearV2AckEventIDs(ackIDs)
-			}
-			trafficReportBoundaryMu.Unlock()
-			if err != nil {
-				if shouldFallbackToV1(2, err) {
-					return nil, err
-				}
-				log.Println("Failed to POST v2 report:", err)
-				continue
-			}
-			processV2ResponseEvents(resp)
-		case <-historyTicker.C:
-			if len(latestReport) == 0 {
-				continue
-			}
-			reportID := fmt.Sprintf("history-%d", time.Now().UnixNano())
-			if _, err := postV2Request(v2.BuildHistoryReportRequest(reportID, latestReport)); err != nil {
-				if shouldFallbackToV1(2, err) {
-					return nil, err
-				}
-				log.Println("Failed to POST v2 history report:", err)
-			}
-		case <-reconnectTicker.C:
-			conn, err := connectWebSocket(websocketEndpoint)
-			if err == nil {
-				return conn, nil
-			}
-			if shouldFallbackToV1(2, err) {
-				return nil, err
-			}
-			log.Println("POST fallback WebSocket recovery failed:", err)
-		case err := <-pullErr:
-			return nil, err
-		}
-	}
-}
-
-func runV2PullLoop(ctx context.Context, errCh chan<- error) {
-	for {
-		select {
-		case <-ctx.Done():
-			return
-		default:
-		}
-		pullID := fmt.Sprintf("pull-%d", time.Now().UnixNano())
-		ackIDs := snapshotV2AckEventIDs()
-		payload := v2.NewRequest(pullID, v2.MethodAgentPull, map[string]interface{}{
-			"capabilities":  []string{"exec", "ping", "message", "event", "terminal", "file"},
-			"ack_event_ids": ackIDs,
-		})
-		resp, err := postV2RequestContext(ctx, payload)
-		if err != nil {
-			if ctx.Err() != nil {
-				return
-			}
-			if shouldFallbackToV1(2, err) {
-				select {
-				case errCh <- err:
-				default:
-				}
-				return
-			}
-			log.Println("Failed to POST v2 pull:", err)
-			time.Sleep(time.Duration(flags.ReconnectInterval) * time.Second)
-			continue
-		}
-		clearV2AckEventIDs(ackIDs)
-		processV2ResponseEvents(resp)
-	}
-}
-
-func postV2Request(payload []byte) (*v2.Response, error) {
-	return postV2RequestContext(context.Background(), payload)
-}
-
-func postV2RequestContext(ctx context.Context, payload []byte) (*v2.Response, error) {
-	endpoint := strings.TrimSuffix(flags.Endpoint, "/") + "/api/clients/v2/rpc?token=" + flags.Token
-	body := payload
-	compressed := false
-	if !flags.DisableCompression {
-		if gz, err := gzipBytes(payload); err == nil {
-			body = gz
-			compressed = true
-		}
-	}
-	req, err := http.NewRequestWithContext(ctx, "POST", endpoint, bytes.NewReader(body))
-	if err != nil {
-		return nil, err
-	}
-	req.Header.Set("Content-Type", "application/json")
-	if compressed {
-		req.Header.Set("Content-Encoding", "gzip")
-	}
-	if flags.CFAccessClientID != "" && flags.CFAccessClientSecret != "" {
-		req.Header.Set("CF-Access-Client-Id", flags.CFAccessClientID)
-		req.Header.Set("CF-Access-Client-Secret", flags.CFAccessClientSecret)
-	}
-	client := dnsresolver.GetHTTPClientWithPreference(35*time.Second, flags.PreferIPVersion)
-	resp, err := client.Do(req)
-	if err != nil {
-		return nil, err
-	}
-	defer resp.Body.Close()
-	bytesBody, err := io.ReadAll(resp.Body)
-	if err != nil {
-		return nil, err
-	}
-	if resp.StatusCode != http.StatusOK {
-		return nil, &httpStatusError{StatusCode: resp.StatusCode, Status: resp.Status, Body: string(bytesBody)}
-	}
-	rpcResp, err := parseV2Response(bytesBody)
-	if err != nil {
-		return nil, err
-	}
-	resetV2ProtocolFailures(2)
-	return rpcResp, nil
-}
-
-func processV2ResponseEvents(resp *v2.Response) {
-	if resp == nil || resp.Result == nil {
-		return
-	}
-	var result v2.EventResult
-	if err := v2.BindResult(resp.Result, &result); err != nil {
-		log.Println("Failed to bind v2 event result:", err)
-		return
-	}
-	for _, event := range result.Events {
-		if processV2Event(nil, event.Method, event.Params, event.ID) {
-			addV2AckEventID(event.ID)
-		}
-	}
 }
 
 func snapshotV2AckEventIDs() []string {
@@ -431,10 +398,16 @@ func connectWebSocket(websocketEndpoint string) (*ws.SafeConn, error) {
 		return nil, err
 	}
 
-	return ws.NewSafeConn(conn), nil
+	safeConn := ws.NewSafeConn(conn)
+	return safeConn, nil
 }
 
-func handleWebSocketMessages(conn *ws.SafeConn, protocolVersion int, done chan<- struct{}) {
+func handleWebSocketMessages(
+	conn *ws.SafeConn,
+	protocolVersion int,
+	inboundMessages chan<- websocketInboundMessage,
+	done chan<- struct{},
+) {
 	defer close(done)
 	for {
 		_, message_raw, err := conn.ReadMessage()
@@ -442,50 +415,64 @@ func handleWebSocketMessages(conn *ws.SafeConn, protocolVersion int, done chan<-
 			log.Println("WebSocket read error:", err)
 			return
 		}
-		var message struct {
-			JSONRPC string      `json:"jsonrpc,omitempty"`
-			Method  string      `json:"method,omitempty"`
-			Params  interface{} `json:"params,omitempty"`
-			EventID string      `json:"event_id,omitempty"`
-			Message string      `json:"message"`
-			// Terminal
-			TerminalId string `json:"request_id,omitempty"`
-			// Remote Exec
-			ExecCommand string `json:"command,omitempty"`
-			ExecTaskID  string `json:"task_id,omitempty"`
-			// Ping
-			PingTaskID uint   `json:"ping_task_id,omitempty"`
-			PingType   string `json:"ping_type,omitempty"`
-			PingTarget string `json:"ping_target,omitempty"`
+		message := websocketInboundMessage{
+			conn:            conn,
+			protocolVersion: protocolVersion,
+			payload:         append([]byte(nil), message_raw...),
 		}
-		err = json.Unmarshal(message_raw, &message)
-		if err != nil {
-			log.Println("Bad ws message:", err)
-			continue
+		select {
+		case inboundMessages <- message:
+		default:
+			log.Println("WebSocket inbound event buffer is full; reconnecting so unacknowledged events can be replayed")
+			return
 		}
-		if message.JSONRPC == v2.Version && protocolVersion >= 2 {
-			if processV2Event(conn, message.Method, message.Params, message.EventID) {
-				addV2AckEventID(message.EventID)
-			}
-			continue
-		}
+	}
+}
 
-		if message.Message == "file" {
-			go establishFileConnection(flags.Token, message.TerminalId, flags.Endpoint)
-			continue
+func processWebSocketMessage(conn *ws.SafeConn, protocolVersion int, messageRaw []byte) {
+	var message struct {
+		JSONRPC string      `json:"jsonrpc,omitempty"`
+		Method  string      `json:"method,omitempty"`
+		Params  interface{} `json:"params,omitempty"`
+		EventID string      `json:"event_id,omitempty"`
+		Message string      `json:"message"`
+		// Terminal
+		TerminalId string `json:"request_id,omitempty"`
+		// Remote Exec
+		ExecCommand string `json:"command,omitempty"`
+		ExecTaskID  string `json:"task_id,omitempty"`
+		// Ping
+		PingTaskID uint   `json:"ping_task_id,omitempty"`
+		PingType   string `json:"ping_type,omitempty"`
+		PingTarget string `json:"ping_target,omitempty"`
+	}
+	err := json.Unmarshal(messageRaw, &message)
+	if err != nil {
+		log.Println("Bad ws message:", err)
+		return
+	}
+	if message.JSONRPC == v2.Version && protocolVersion >= 2 {
+		if processV2Event(conn, message.Method, message.Params, message.EventID) {
+			addV2AckEventID(message.EventID)
 		}
-		if message.Message == "terminal" || message.TerminalId != "" {
-			go establishTerminalConnection(flags.Token, message.TerminalId, flags.Endpoint)
-			continue
-		}
-		if message.Message == "exec" {
-			go NewTask(message.ExecTaskID, message.ExecCommand)
-			continue
-		}
-		if message.Message == "ping" || message.PingTaskID != 0 || message.PingType != "" || message.PingTarget != "" {
-			go NewPingTask(conn, protocolVersion, message.PingTaskID, message.PingType, message.PingTarget)
-			continue
-		}
+		return
+	}
+
+	if message.Message == "file" {
+		go establishFileConnection(flags.Token, message.TerminalId, flags.Endpoint)
+		return
+	}
+	if message.Message == "terminal" || message.TerminalId != "" {
+		go establishTerminalConnection(flags.Token, message.TerminalId, flags.Endpoint)
+		return
+	}
+	if message.Message == "exec" {
+		go NewTask(message.ExecTaskID, message.ExecCommand)
+		return
+	}
+	if message.Message == "ping" || message.PingTaskID != 0 || message.PingType != "" || message.PingTarget != "" {
+		go NewPingTask(conn, protocolVersion, message.PingTaskID, message.PingType, message.PingTarget)
+		return
 	}
 }
 
@@ -558,11 +545,12 @@ func processV2Event(conn *ws.SafeConn, method string, params interface{}, eventI
 			TotalDown:   snapshot.TotalDown,
 		}
 		payload := v2.NewNotification(v2.MethodAgentTrafficSnapshotResult, result)
-		if conn != nil {
-			err = conn.WriteMessage(websocket.TextMessage, payload)
-		} else {
-			_, err = postV2Request(payload)
+		if conn == nil {
+			trafficReportBoundaryMu.Unlock()
+			forgetV2EventSeen(eventID)
+			return false
 		}
+		err = conn.WriteMessage(websocket.TextMessage, payload)
 		trafficReportBoundaryMu.Unlock()
 		if err != nil {
 			log.Printf("failed to return traffic snapshot: %v", err)
@@ -647,8 +635,8 @@ func establishFileConnection(token, id, endpoint string) {
 // newWSDialer 构造统一的 WebSocket 拨号器（自定义解析、IPv4/IPv6 动态排序、可选 TLS 忽略）
 func newWSDialer() *websocket.Dialer {
 	d := &websocket.Dialer{
-		HandshakeTimeout:  15 * time.Second,
-		NetDialContext:    dnsresolver.GetDialContextWithPreference(15*time.Second, flags.PreferIPVersion),
+		HandshakeTimeout:  websocketConnectTimeout,
+		NetDialContext:    dnsresolver.GetDialContextWithPreference(websocketConnectTimeout, flags.PreferIPVersion),
 		Proxy:             http.ProxyFromEnvironment,
 		EnableCompression: !flags.DisableCompression,
 	}

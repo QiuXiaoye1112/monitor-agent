@@ -94,7 +94,7 @@ jobs:
           if [ "${{ matrix.goos }}" = "windows" ]; then
             BINARY_NAME=${BINARY_NAME}.exe
           fi
-          go build -trimpath -ldflags="-X github.com/komari-monitor/komari-agent/update.CurrentVersion=${VERSION}" -o $BINARY_NAME
+          go build -trimpath -ldflags="-X monitor-agent/update.CurrentVersion=${VERSION}" -o $BINARY_NAME
 
       - name: Upload binary as artifact
         uses: actions/upload-artifact@v4
@@ -200,7 +200,7 @@ jobs:
           CGO_ENABLED: 0
           VERSION: ${{ needs.prepare.outputs.version }}
         run: |
-          LDFLAGS="-X github.com/komari-monitor/komari-agent/update.CurrentVersion=${VERSION}"
+          LDFLAGS="-X monitor-agent/update.CurrentVersion=${VERSION}"
 
           echo "Building for linux/amd64..."
           GOARCH=amd64 go build -trimpath -ldflags="$LDFLAGS" -o komari-agent-linux-amd64
