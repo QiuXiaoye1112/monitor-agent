@@ -18,6 +18,9 @@ func TestHeartbeatTiming(t *testing.T) {
 	if heartbeatTimeout != 30*time.Second {
 		t.Fatalf("heartbeat timeout = %s, want 30s", heartbeatTimeout)
 	}
+	if heartbeatWriteTimeout != 5*time.Second {
+		t.Fatalf("heartbeat write timeout = %s, want 5s", heartbeatWriteTimeout)
+	}
 	if websocketConnectTimeout != 30*time.Second {
 		t.Fatalf("websocket connect timeout = %s, want 30s", websocketConnectTimeout)
 	}

@@ -128,6 +128,9 @@ var RootCmd = &cobra.Command{
 			http.DefaultTransport.(*http.Transport).TLSClientConfig = &tls.Config{InsecureSkipVerify: true}
 		}
 		go server.MonitorBasicInfoChanges()
+		if err := server.InitializeDurableTasks(); err != nil {
+			log.Printf("Durable remote task storage is unavailable; exec events will not be acknowledged: %v", err)
+		}
 		server.EstablishWebSocketConnection()
 		return nil
 	},

@@ -2,6 +2,7 @@ package server
 
 import (
 	"errors"
+	"fmt"
 	"log"
 	"sync"
 	"time"
@@ -15,15 +16,11 @@ const maxPendingResults = 128
 type pendingResultKind uint8
 
 const (
-	pendingTaskResult pendingResultKind = iota + 1
-	pendingPingResult
+	pendingPingResult pendingResultKind = iota + 1
 )
 
 type pendingResult struct {
 	kind       pendingResultKind
-	taskID     string
-	taskOutput string
-	exitCode   int
 	pingTaskID uint
 	pingValue  int
 	finishedAt time.Time
@@ -57,16 +54,10 @@ func samePendingResult(left, right pendingResult) bool {
 	if left.kind != right.kind {
 		return false
 	}
-	if left.kind == pendingTaskResult {
-		return left.taskID == right.taskID
-	}
 	return left.pingTaskID == right.pingTaskID
 }
 
 func pendingResultDescription(result pendingResult) string {
-	if result.kind == pendingTaskResult {
-		return "task result " + result.taskID
-	}
 	return "ping result"
 }
 
@@ -101,8 +92,6 @@ func flushPendingResults(conn *ws.SafeConn, protocolVersion int) {
 
 			var err error
 			switch result.kind {
-			case pendingTaskResult:
-				err = sendTaskResult(reportContext, result)
 			case pendingPingResult:
 				if contextErr := reportContext.Err(); contextErr != nil {
 					err = contextErr
@@ -133,4 +122,50 @@ func flushPendingResults(conn *ws.SafeConn, protocolVersion int) {
 			return
 		}
 	}()
+}
+
+var durableTaskFlushState struct {
+	sync.Mutex
+	flushing bool
+}
+
+func flushDurableTaskResults() {
+	durableTaskFlushState.Lock()
+	if durableTaskFlushState.flushing {
+		durableTaskFlushState.Unlock()
+		return
+	}
+	durableTaskFlushState.flushing = true
+	durableTaskFlushState.Unlock()
+
+	go func() {
+		defer func() {
+			durableTaskFlushState.Lock()
+			durableTaskFlushState.flushing = false
+			durableTaskFlushState.Unlock()
+		}()
+		if err := flushDurableTaskResultsOnce(); err != nil {
+			log.Printf("Failed to flush durable task results: %v", err)
+		}
+	}()
+}
+
+func flushDurableTaskResultsOnce() error {
+	store, err := currentDurableTaskStore()
+	if err != nil {
+		return err
+	}
+	for _, task := range store.CompletedTasks() {
+		reportContext, ok := monitorServiceHealth.context()
+		if !ok {
+			return nil
+		}
+		if err := sendTaskResult(reportContext, task); err != nil {
+			return fmt.Errorf("upload persisted task %s: %w", task.TaskID, err)
+		}
+		if err := store.DeleteTask(task.TaskID); err != nil {
+			return fmt.Errorf("delete uploaded durable task %s: %w", task.TaskID, err)
+		}
+	}
+	return nil
 }

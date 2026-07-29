@@ -43,6 +43,14 @@ func (sc *SafeConn) WriteJSON(v interface{}) error {
 	return err
 }
 
+// WriteControl bypasses the data-frame mutex so Ping/Pong/Close control frames
+// can still meet their short deadline while a normal report write is blocked.
+// Gorilla WebSocket explicitly permits WriteControl concurrently with other
+// connection methods.
+func (sc *SafeConn) WriteControl(messageType int, data []byte, deadline time.Time) error {
+	return sc.conn.WriteControl(messageType, data, deadline)
+}
+
 func (sc *SafeConn) Close() error {
 	sc.mu.Lock()
 	defer sc.mu.Unlock()

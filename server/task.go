@@ -31,27 +31,55 @@ const (
 var taskSlots = make(chan struct{}, maxConcurrentTasks)
 
 func NewTask(task_id, command string) {
-	if task_id == "" {
+	if err := AcceptDurableTask(task_id, command); err != nil {
+		log.Printf("Failed to persist task %s before execution: %v", task_id, err)
 		return
 	}
-	if strings.TrimSpace(command) == "" {
-		uploadTaskResult(task_id, "No command provided", 0, time.Now())
+	go RunDurableTask(task_id)
+}
+
+func RunDurableTask(taskID string) {
+	store, err := currentDurableTaskStore()
+	if err != nil {
+		log.Printf("Cannot run durable task %s: %v", taskID, err)
 		return
+	}
+	task, ok := store.Get(taskID)
+	if !ok || task.Status == taskStatusCompleted || task.Status == taskStatusRunning {
+		return
+	}
+	if err := store.MarkTaskRunning(taskID); err != nil {
+		if !errors.Is(err, errTaskNotAccepted) {
+			log.Printf("Failed to mark durable task %s as running: %v", taskID, err)
+		}
+		return
+	}
+
+	result, exitCode := executeTask(taskID, task.Command)
+	finishedAt := time.Now()
+	if err := store.CompleteTask(taskID, result, exitCode, finishedAt); err != nil {
+		log.Printf("Failed to persist result for task %s: %v", taskID, err)
+		return
+	}
+	flushDurableTaskResults()
+}
+
+func executeTask(taskID, command string) (string, int) {
+	if strings.TrimSpace(command) == "" {
+		return "No command provided", 0
 	}
 	if flags.DisableWebSsh {
-		uploadTaskResult(task_id, "Remote control is disabled.", -1, time.Now())
-		return
+		return "Remote control is disabled.", -1
 	}
 	select {
 	case taskSlots <- struct{}{}:
 		defer func() { <-taskSlots }()
 	default:
-		uploadTaskResult(task_id, "Too many concurrent remote tasks.", -1, time.Now())
-		return
+		return "Too many concurrent remote tasks.", -1
 	}
-	log.Printf("Executing task %s", task_id)
+	log.Printf("Executing task %s", taskID)
 	result, exitCode := runTaskCommand(command)
-	uploadTaskResult(task_id, result, exitCode, time.Now())
+	return result, exitCode
 }
 
 func runTaskCommand(command string) (string, int) {
@@ -155,31 +183,12 @@ func appendErrorResult(result, err string) string {
 	return result + "\n" + err
 }
 
-func uploadTaskResult(taskID, result string, exitCode int, finishedAt time.Time) {
-	pending := pendingResult{
-		kind:       pendingTaskResult,
-		taskID:     taskID,
-		taskOutput: result,
-		exitCode:   exitCode,
-		finishedAt: finishedAt,
-	}
-	reportContext, ok := monitorServiceHealth.context()
-	if !ok {
-		enqueuePendingResult(pending)
-		return
-	}
-	if err := sendTaskResult(reportContext, pending); err != nil {
-		log.Printf("Failed to upload task result; queued for recovery: %v", err)
-		enqueuePendingResult(pending)
-	}
-}
-
-func sendTaskResult(ctx context.Context, pending pendingResult) error {
+func sendTaskResult(ctx context.Context, task DurableTask) error {
 	payload := map[string]interface{}{
-		"task_id":     pending.taskID,
-		"result":      pending.taskOutput,
-		"exit_code":   pending.exitCode,
-		"finished_at": pending.finishedAt,
+		"task_id":     task.TaskID,
+		"result":      task.Result,
+		"exit_code":   task.ExitCode,
+		"finished_at": task.FinishedAt,
 	}
 
 	jsonData, err := json.Marshal(payload)

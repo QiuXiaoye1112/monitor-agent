@@ -1,7 +1,6 @@
 package server
 
 import (
-	"fmt"
 	"testing"
 	"time"
 )
@@ -21,27 +20,27 @@ func TestPendingResultsAreBoundedAndDeduplicated(t *testing.T) {
 	})
 
 	first := pendingResult{
-		kind:       pendingTaskResult,
-		taskID:     "same-task",
-		taskOutput: "old",
+		kind:       pendingPingResult,
+		pingTaskID: 42,
+		pingValue:  1,
 		finishedAt: time.Now(),
 	}
 	enqueuePendingResult(first)
-	first.taskOutput = "new"
+	first.pingValue = 2
 	enqueuePendingResult(first)
 
 	pendingResults.Lock()
-	if len(pendingResults.items) != 1 || pendingResults.items[0].taskOutput != "new" {
+	if len(pendingResults.items) != 1 || pendingResults.items[0].pingValue != 2 {
 		pendingResults.Unlock()
-		t.Fatal("duplicate task result was not replaced")
+		t.Fatal("duplicate ping result was not replaced")
 	}
 	pendingResults.items = nil
 	pendingResults.Unlock()
 
 	for index := 0; index < maxPendingResults+1; index++ {
 		enqueuePendingResult(pendingResult{
-			kind:       pendingTaskResult,
-			taskID:     fmt.Sprintf("task-%d", index),
+			kind:       pendingPingResult,
+			pingTaskID: uint(index + 1),
 			finishedAt: time.Now(),
 		})
 	}
@@ -51,7 +50,7 @@ func TestPendingResultsAreBoundedAndDeduplicated(t *testing.T) {
 	if len(pendingResults.items) != maxPendingResults {
 		t.Fatalf("pending result count = %d, want %d", len(pendingResults.items), maxPendingResults)
 	}
-	if pendingResults.items[0].taskID != "task-1" {
-		t.Fatalf("oldest retained task = %q, want task-1", pendingResults.items[0].taskID)
+	if pendingResults.items[0].pingTaskID != 2 {
+		t.Fatalf("oldest retained ping task = %d, want 2", pendingResults.items[0].pingTaskID)
 	}
 }

@@ -35,6 +35,7 @@ const (
 	maxPendingInboundMessages = 128
 	heartbeatInterval         = 30 * time.Second
 	heartbeatTimeout          = 30 * time.Second
+	heartbeatWriteTimeout     = 5 * time.Second
 	websocketConnectTimeout   = 30 * time.Second
 )
 
@@ -180,6 +181,7 @@ func EstablishWebSocketConnection() {
 		retryState.pongReceived()
 		recordHeartbeatPong()
 		flushPendingResults(conn, activeProtocol)
+		flushDurableTaskResults()
 		processPendingInboundMessages()
 		resetHeartbeatTimer(heartbeatInterval)
 		return true
@@ -308,7 +310,11 @@ func configureHeartbeat(conn *ws.SafeConn, pongEvents chan<- heartbeatPong) {
 }
 
 func sendHeartbeat(conn *ws.SafeConn, payload string) error {
-	return conn.WriteMessage(websocket.PingMessage, []byte(payload))
+	return conn.WriteControl(
+		websocket.PingMessage,
+		[]byte(payload),
+		time.Now().Add(heartbeatWriteTimeout),
+	)
 }
 
 func isTimelyHeartbeatPong(pong heartbeatPong, pendingPayload string, deadline time.Time) bool {
@@ -467,7 +473,7 @@ func processWebSocketMessage(conn *ws.SafeConn, protocolVersion int, messageRaw 
 		return
 	}
 	if message.Message == "exec" {
-		go NewTask(message.ExecTaskID, message.ExecCommand)
+		NewTask(message.ExecTaskID, message.ExecCommand)
 		return
 	}
 	if message.Message == "ping" || message.PingTaskID != 0 || message.PingType != "" || message.PingTarget != "" {
@@ -487,7 +493,12 @@ func processV2Event(conn *ws.SafeConn, method string, params interface{}, eventI
 			Command string `json:"command"`
 		}
 		if err := v2.BindParams(params, &p); err == nil {
-			go NewTask(p.TaskID, p.Command)
+			if err := AcceptDurableTask(p.TaskID, p.Command); err != nil {
+				log.Printf("failed to persist task %s before ACK: %v", p.TaskID, err)
+				forgetV2EventSeen(eventID)
+				return false
+			}
+			go RunDurableTask(p.TaskID)
 			return true
 		} else {
 			log.Printf("bad v2 exec params: %v", err)
