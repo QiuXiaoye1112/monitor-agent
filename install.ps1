@@ -12,7 +12,7 @@ function Log-Config { param([string]$Message) Write-Host "- $Message"    -Foregr
 $InstallDir = Join-Path $Env:ProgramFiles "MonitorAgent"
 $ServiceName = "monitor-agent"
 $GitHubProxy = ""
-$KomariArgs = @()
+$VpsMonitorArgs = @()
 $InstallVersion = ""
 
 # Parse script arguments
@@ -22,7 +22,7 @@ for ($i = 0; $i -lt $args.Count; $i++) {
         "--install-service-name" { $ServiceName = $args[$i + 1]; $i++; continue }
         "--install-ghproxy" { $GitHubProxy = $args[$i + 1]; $i++; continue }
         "--install-version" { $InstallVersion = $args[$i + 1]; $i++; continue }
-        Default { $KomariArgs += $args[$i] }
+        Default { $VpsMonitorArgs += $args[$i] }
     }
 }
 
@@ -160,7 +160,7 @@ Log-Step "Installation configuration:"
 Log-Config "Service name: $ServiceName"
 Log-Config "Install directory: $InstallDir"
 Log-Config "GitHub proxy: $ProxyDisplay"
-Log-Config "Agent arguments: $($KomariArgs -join ' ')"
+Log-Config "Agent arguments: $($VpsMonitorArgs -join ' ')"
 if ($InstallVersion -ne "") {
     Log-Config "Specified agent version: $InstallVersion"
 } else {
@@ -244,7 +244,7 @@ Log-Success "Downloaded and saved to $AgentPath"
 
 # Register and start service
 Log-Step "Configuring Windows service with nssm..."
-$argString = $KomariArgs -join ' '
+$argString = $VpsMonitorArgs -join ' '
 # Ensure InstallDir and AgentPath are quoted if they contain spaces
 $quotedAgentPath = "`"$AgentPath`""
 nssm install $ServiceName $quotedAgentPath $argString
