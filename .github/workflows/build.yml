@@ -37,7 +37,7 @@ jobs:
           CGO_ENABLED: 0
           VERSION: ${{ github.sha }}
         run: |
-          BINARY_NAME=komari-agent-${{ matrix.goos }}-${{ matrix.goarch }}
+          BINARY_NAME=monitor-agent-${{ matrix.goos }}-${{ matrix.goarch }}
           if [ "${{ matrix.goos }}" = "windows" ]; then
             BINARY_NAME=${BINARY_NAME}.exe
           fi
@@ -46,5 +46,5 @@ jobs:
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
-          name: komari-agent-${{ matrix.goos }}-${{ matrix.goarch }}
-          path: komari-agent-${{ matrix.goos }}-${{ matrix.goarch }}*
+          name: monitor-agent-${{ matrix.goos }}-${{ matrix.goarch }}
+          path: monitor-agent-${{ matrix.goos }}-${{ matrix.goarch }}*
