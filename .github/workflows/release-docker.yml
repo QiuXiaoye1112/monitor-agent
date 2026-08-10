@@ -42,10 +42,10 @@ jobs:
           LDFLAGS="-X monitor-agent/update.CurrentVersion=${VERSION}"
 
           echo "Building for linux/amd64..."
-          GOARCH=amd64 go build -trimpath -ldflags="$LDFLAGS" -o komari-agent-linux-amd64
+          GOARCH=amd64 go build -trimpath -ldflags="$LDFLAGS" -o monitor-agent-linux-amd64
 
           echo "Building for linux/arm64..."
-          GOARCH=arm64 go build -trimpath -ldflags="$LDFLAGS" -o komari-agent-linux-arm64
+          GOARCH=arm64 go build -trimpath -ldflags="$LDFLAGS" -o monitor-agent-linux-arm64
 
       - name: Set up QEMU
         uses: docker/setup-qemu-action@v3
