@@ -43,9 +43,6 @@ var RootCmd = &cobra.Command{
 				return fmt.Errorf("failed to parse config file: %w", err)
 			}
 		}
-		if flags.ProtocolVersion == 0 {
-			flags.ProtocolVersion = 2
-		}
 		if flags.Interval <= 0 {
 			return fmt.Errorf("invalid --interval value %v: expected a number greater than 0", flags.Interval)
 		}
@@ -127,7 +124,6 @@ var RootCmd = &cobra.Command{
 		if flags.IgnoreUnsafeCert {
 			http.DefaultTransport.(*http.Transport).TLSClientConfig = &tls.Config{InsecureSkipVerify: true}
 		}
-		go server.MonitorBasicInfoChanges()
 		if err := server.InitializeDurableTasks(); err != nil {
 			log.Printf("Durable remote task storage is unavailable; exec events will not be acknowledged: %v", err)
 		}
@@ -166,7 +162,7 @@ func init() {
 	RootCmd.PersistentFlags().BoolVar(&flags.DisableWebSsh, "disable-web-ssh", false, "Disable remote control(web ssh and rce)")
 	//RootCmd.PersistentFlags().BoolVar(&flags.MemoryModeAvailable, "memory-mode-available", false, "[deprecated]Report memory as available instead of used.")
 	RootCmd.PersistentFlags().Float64VarP(&flags.Interval, "interval", "i", 1.0, "Interval in seconds")
-	RootCmd.PersistentFlags().Float64Var(&flags.HistoryInterval, "history-interval", 5.0, "History chart report interval in seconds (1-60)")
+	RootCmd.PersistentFlags().Float64Var(&flags.HistoryInterval, "history-interval", 60.0, "History chart report interval in seconds (1-60)")
 	RootCmd.PersistentFlags().BoolVarP(&flags.IgnoreUnsafeCert, "ignore-unsafe-cert", "u", false, "Ignore unsafe certificate errors")
 	RootCmd.PersistentFlags().IntVarP(&flags.MaxRetries, "max-retries", "r", 3, "Task result upload retries")
 	RootCmd.PersistentFlags().StringVar(&flags.IncludeNics, "include-nics", "", "Comma-separated list of network interfaces to include")
@@ -183,7 +179,6 @@ func init() {
 	RootCmd.PersistentFlags().StringVar(&flags.CustomIpv6, "custom-ipv6", "", "Custom IPv6 address to use")
 	RootCmd.PersistentFlags().BoolVar(&flags.GetIpAddrFromNic, "get-ip-addr-from-nic", false, "Get IP address from network interface")
 	RootCmd.PersistentFlags().StringVar(&flags.ConfigFile, "config", "", "Path to the configuration file")
-	RootCmd.PersistentFlags().IntVar(&flags.ProtocolVersion, "protocol-version", 2, "Report protocol version (1 or 2)")
 	RootCmd.PersistentFlags().BoolVar(&flags.DisableCompression, "disable-compression", false, "Disable v2 gzip/permessage-deflate compression")
 	RootCmd.PersistentFlags().StringVar(&flags.PreferIPVersion, "prefer-ip-version", "", "Prefer IP version for dashboard connections: 4 or 6")
 	RootCmd.PersistentFlags().ParseErrorsWhitelist.UnknownFlags = true

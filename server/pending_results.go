@@ -61,7 +61,7 @@ func pendingResultDescription(result pendingResult) string {
 	return "ping result"
 }
 
-func flushPendingResults(conn *ws.SafeConn, protocolVersion int) {
+func flushPendingResults(conn *ws.SafeConn) {
 	pendingResults.Lock()
 	if pendingResults.flushing || len(pendingResults.items) == 0 {
 		pendingResults.Unlock()
@@ -98,15 +98,7 @@ func flushPendingResults(conn *ws.SafeConn, protocolVersion int) {
 				} else if conn == nil {
 					err = errors.New("WebSocket is not connected")
 				} else {
-					payload := any(map[string]interface{}{
-						"type":        "ping_result",
-						"task_id":     result.pingTaskID,
-						"value":       result.pingValue,
-						"finished_at": result.finishedAt,
-					})
-					if protocolVersion >= 2 {
-						payload = v2.BuildPingResultPayload(result.pingTaskID, result.pingValue, result.finishedAt)
-					}
+					payload := v2.BuildPingResultPayload(result.pingTaskID, result.pingValue, result.finishedAt)
 					err = conn.WriteJSON(payload)
 				}
 			}

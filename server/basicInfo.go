@@ -3,7 +3,6 @@ package server
 import (
 	"bytes"
 	"context"
-	"encoding/json"
 	"fmt"
 	"io"
 	"log"
@@ -24,8 +23,6 @@ import (
 
 var flags = pkg_flags.GlobalConfig
 
-const basicInfoCheckInterval = time.Minute
-
 type basicInfoFingerprint struct {
 	OS          string
 	Network     string
@@ -38,17 +35,6 @@ var basicInfoUploadState struct {
 	sync.Mutex
 	lastFingerprint basicInfoFingerprint
 	hasUploaded     bool
-}
-
-func MonitorBasicInfoChanges() {
-	ticker := time.NewTicker(basicInfoCheckInterval)
-	defer ticker.Stop()
-	for range ticker.C {
-		if !monitorServiceHealth.canReport() {
-			continue
-		}
-		checkAndUploadBasicInfo(false)
-	}
 }
 
 func UpdateBasicInfo() {
@@ -211,32 +197,11 @@ func uploadBasicInfo(ctx context.Context) error {
 }
 
 func tryUploadData(ctx context.Context, data map[string]interface{}) error {
-	protocolVersion := uploadProtocolVersion()
-	if protocolVersion >= 2 {
-		err := tryUploadDataWithProtocol(ctx, data, 2)
-		if shouldFallbackToV1(2, err) {
-			log.Printf("v2 basic info failed %d consecutive protocol attempts, falling back to v1", v2ProtocolFallbackThreshold)
-			setConnectionProtocolVersion(1)
-			return tryUploadDataWithProtocol(ctx, data, 1)
-		}
-		return err
-	}
-	return tryUploadDataWithProtocol(ctx, data, 1)
-}
-
-func tryUploadDataWithProtocol(ctx context.Context, data map[string]interface{}, protocolVersion int) error {
-	endpoint := strings.TrimSuffix(flags.Endpoint, "/") + "/api/clients/uploadBasicInfo?token=" + flags.Token
-	payload, err := json.Marshal(data)
-	if err != nil {
-		return err
-	}
-	if protocolVersion >= 2 {
-		endpoint = strings.TrimSuffix(flags.Endpoint, "/") + "/api/clients/v2/rpc?token=" + flags.Token
-		payload = v2.BuildBasicInfoPayload(data)
-	}
+	endpoint := strings.TrimSuffix(flags.Endpoint, "/") + "/api/clients/v2/rpc?token=" + flags.Token
+	payload := v2.BuildBasicInfoPayload(data)
 	body := payload
 	compressed := false
-	if protocolVersion >= 2 && !flags.DisableCompression {
+	if !flags.DisableCompression {
 		if gz, err := transport.GzipBytes(payload); err == nil {
 			body = gz
 			compressed = true
@@ -275,13 +240,10 @@ func tryUploadDataWithProtocol(ctx context.Context, data map[string]interface{},
 	if resp.StatusCode != http.StatusOK {
 		return &httpStatusError{StatusCode: resp.StatusCode, Status: resp.Status, Body: message}
 	}
-	if protocolVersion >= 2 {
-		if len(bytes.TrimSpace(respBody)) > 0 {
-			if _, err := parseV2Response(respBody); err != nil {
-				return err
-			}
+	if len(bytes.TrimSpace(respBody)) > 0 {
+		if _, err := parseV2Response(respBody); err != nil {
+			return err
 		}
-		resetV2ProtocolFailures(protocolVersion)
 	}
 
 	return nil

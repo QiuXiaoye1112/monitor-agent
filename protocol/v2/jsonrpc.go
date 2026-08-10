@@ -4,7 +4,7 @@ import (
 	"encoding/json"
 	"time"
 
-	v1 "monitor-agent/protocol/v1"
+	report "monitor-agent/protocol/report"
 )
 
 const (
@@ -80,19 +80,19 @@ func NewRequest(id interface{}, method string, params interface{}) []byte {
 	return payload
 }
 
-func BuildReportPayload(report v1.ReportPayload, ackEventIDs []string) []byte {
+func BuildReportPayload(report report.ReportPayload, ackEventIDs []string) []byte {
 	return NewNotification(MethodAgentReport, reportParams{Report: json.RawMessage(report), AckEventIDs: ackEventIDs})
 }
 
-func BuildReportRequest(id interface{}, report v1.ReportPayload, ackEventIDs []string) []byte {
+func BuildReportRequest(id interface{}, report report.ReportPayload, ackEventIDs []string) []byte {
 	return NewRequest(id, MethodAgentReport, reportParams{Report: json.RawMessage(report), AckEventIDs: ackEventIDs})
 }
 
-func BuildHistoryReportPayload(report v1.ReportPayload) []byte {
+func BuildHistoryReportPayload(report report.ReportPayload) []byte {
 	return NewNotification(MethodAgentHistory, reportParams{Report: json.RawMessage(report)})
 }
 
-func BuildHistoryReportRequest(id interface{}, report v1.ReportPayload) []byte {
+func BuildHistoryReportRequest(id interface{}, report report.ReportPayload) []byte {
 	return NewRequest(id, MethodAgentHistory, reportParams{Report: json.RawMessage(report)})
 }
 

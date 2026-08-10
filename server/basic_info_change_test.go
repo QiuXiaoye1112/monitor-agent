@@ -5,14 +5,9 @@ import (
 	"errors"
 	"net"
 	"testing"
-	"time"
 )
 
 func TestBasicInfoCheckUsesLocalChangeDetection(t *testing.T) {
-	if basicInfoCheckInterval != time.Minute {
-		t.Fatalf("basic info check interval = %s, want 1m", basicInfoCheckInterval)
-	}
-
 	original := basicInfoFingerprint{
 		OS:          "linux",
 		Network:     "eth0|192.0.2.1",
@@ -49,7 +44,7 @@ func TestBasicInfoRequestHonorsCanceledReportingContext(t *testing.T) {
 
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
-	err := tryUploadDataWithProtocol(ctx, map[string]interface{}{"os": "linux"}, 1)
+	err := tryUploadData(ctx, map[string]interface{}{"os": "linux"})
 	if !errors.Is(err, context.Canceled) {
 		t.Fatalf("upload error = %v, want context.Canceled", err)
 	}

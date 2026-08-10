@@ -118,7 +118,7 @@ func TestReaderForwardsMessageBeforeFirstPong(t *testing.T) {
 			return
 		}
 		defer conn.Close()
-		_ = conn.WriteMessage(websocket.TextMessage, []byte(`{"message":"exec","task_id":"queued"}`))
+		_ = conn.WriteMessage(websocket.TextMessage, []byte(`{"jsonrpc":"2.0","method":"agent.exec","params":{"task_id":"queued","command":"echo test"},"event_id":"event-queued"}`))
 		_, _, _ = conn.ReadMessage()
 	}))
 	defer server.Close()
@@ -135,7 +135,7 @@ func TestReaderForwardsMessageBeforeFirstPong(t *testing.T) {
 
 	inboundMessages := make(chan websocketInboundMessage, 1)
 	readDone := make(chan struct{})
-	go handleWebSocketMessages(conn, 2, inboundMessages, readDone)
+	go handleWebSocketMessages(conn, inboundMessages, readDone)
 
 	select {
 	case inbound := <-inboundMessages:

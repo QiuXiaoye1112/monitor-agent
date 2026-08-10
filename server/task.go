@@ -30,14 +30,6 @@ const (
 
 var taskSlots = make(chan struct{}, maxConcurrentTasks)
 
-func NewTask(task_id, command string) {
-	if err := AcceptDurableTask(task_id, command); err != nil {
-		log.Printf("Failed to persist task %s before execution: %v", task_id, err)
-		return
-	}
-	go RunDurableTask(task_id)
-}
-
 func RunDurableTask(taskID string) {
 	store, err := currentDurableTaskStore()
 	if err != nil {
@@ -361,7 +353,7 @@ func httpPing(target string, timeout time.Duration) (int64, error) {
 	return latency, errors.New("http status not ok")
 }
 
-func NewPingTask(conn *ws.SafeConn, protocolVersion int, taskID uint, pingType, pingTarget string) {
+func NewPingTask(conn *ws.SafeConn, taskID uint, pingType, pingTarget string) {
 	if taskID == 0 {
 		log.Printf("Invalid task ID: %d", taskID)
 		return
@@ -420,16 +412,7 @@ func NewPingTask(conn *ws.SafeConn, protocolVersion int, taskID uint, pingType, 
 		pingResult = int(latency)
 	}
 	finishedAt := time.Now()
-	payload := map[string]interface{}{
-		"type":        "ping_result",
-		"task_id":     taskID,
-		"value":       pingResult,
-		"finished_at": finishedAt,
-	}
-	var wsPayload interface{} = payload
-	if protocolVersion >= 2 {
-		wsPayload = v2.BuildPingResultPayload(taskID, pingResult, finishedAt)
-	}
+	wsPayload := v2.BuildPingResultPayload(taskID, pingResult, finishedAt)
 
 	pending := pendingResult{
 		kind:       pendingPingResult,
