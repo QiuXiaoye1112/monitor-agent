@@ -1,9 +1,9 @@
 __debug*
 agent.json
 .vscode/
-komari-agent.exe
-komari-agent
-.komari-agent.exe.old
+vps-monitor-agent.exe
+vps-monitor-agent
+.vps-monitor-agent.exe.old
 build/
 auto-discovery.json
 net_static.json
