@@ -35,6 +35,7 @@ func TestICMPPing(t *testing.T) {
 }
 
 func TestTCPPing(t *testing.T) {
+	requireNetworkIntegration(t)
 	timeout := 3 * time.Second
 	for _, tt := range testTargets {
 		t.Run(tt.target, func(t *testing.T) {
