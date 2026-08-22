@@ -5,6 +5,9 @@ import (
 	"runtime"
 	"strings"
 	"testing"
+	"time"
+
+	"monitor-agent/monitoring/trafficledger"
 )
 
 func TestConnectionsCount(t *testing.T) {
@@ -119,6 +122,17 @@ func TestParseNics(t *testing.T) {
 	}
 }
 
+func TestNetworkInterfaceIdentityDistinguishesRecreatedDevice(t *testing.T) {
+	first := networkInterfaceIdentity("eth0", 2, "AA:BB:CC:DD:EE:FF")
+	second := networkInterfaceIdentity("eth0", 7, "11:22:33:44:55:66")
+	if first == second {
+		t.Fatalf("recreated interfaces shared identity %q", first)
+	}
+	if first != "eth0#2#aa:bb:cc:dd:ee:ff" {
+		t.Fatalf("unexpected normalized identity %q", first)
+	}
+}
+
 func TestShouldInclude(t *testing.T) {
 	tests := []struct {
 		name        string
@@ -226,6 +240,28 @@ func TestNetworkSpeedFallback(t *testing.T) {
 
 	t.Logf("TotalUp: %d, TotalDown: %d, UpSpeed: %d/s, DownSpeed: %d/s",
 		totalUp, totalDown, upSpeed, downSpeed)
+}
+
+func TestNetworkSpeedUsesPerInterfaceBaselines(t *testing.T) {
+	networkSpeedSample.Lock()
+	networkSpeedSample.counters = nil
+	networkSpeedSample.sampledAt = time.Time{}
+	networkSpeedSample.Unlock()
+
+	start := time.Date(2026, time.August, 1, 0, 0, 0, 0, time.UTC)
+	first, down := updateNetworkSpeedSample(map[string]trafficledger.InterfaceCounter{
+		"eth0": {Up: 100, Down: 200},
+	}, start)
+	if first != 0 || down != 0 {
+		t.Fatalf("initial speed = %d/%d", first, down)
+	}
+	up, down := updateNetworkSpeedSample(map[string]trafficledger.InterfaceCounter{
+		"eth0": {Up: 200, Down: 300},
+		"eth1": {Up: 1 << 40, Down: 1 << 40},
+	}, start.Add(time.Second))
+	if up != 100 || down != 100 {
+		t.Fatalf("new interface caused speed spike = %d/%d", up, down)
+	}
 }
 
 func TestNetworkSpeedWithNicFilters(t *testing.T) {

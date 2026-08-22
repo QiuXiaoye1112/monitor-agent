@@ -34,12 +34,16 @@ type usageReport struct {
 }
 
 type networkReport struct {
-	Up             uint64 `json:"up"`
-	Down           uint64 `json:"down"`
-	TotalUp        uint64 `json:"totalUp"`
-	TotalDown      uint64 `json:"totalDown"`
-	CycleID        string `json:"cycleId"`
-	CycleStartedAt string `json:"cycleStartedAt"`
+	Up              uint64 `json:"up"`
+	Down            uint64 `json:"down"`
+	TotalUp         uint64 `json:"totalUp"`
+	TotalDown       uint64 `json:"totalDown"`
+	CycleID         string `json:"cycleId"`
+	CycleStartedAt  string `json:"cycleStartedAt"`
+	LedgerEpoch     string `json:"ledgerEpoch"`
+	CycleGeneration uint64 `json:"cycleGeneration"`
+	SampleSequence  uint64 `json:"sampleSequence"`
+	CapturedAt      string `json:"capturedAt"`
 }
 
 type connectionsReport struct {
@@ -48,11 +52,14 @@ type connectionsReport struct {
 }
 
 type TrafficSnapshot struct {
-	CapturedAt     time.Time
-	CycleID        string
-	CycleStartedAt time.Time
-	TotalUp        int64
-	TotalDown      int64
+	CapturedAt      time.Time
+	CycleID         string
+	CycleStartedAt  time.Time
+	LedgerEpoch     string
+	CycleGeneration uint64
+	SampleSequence  uint64
+	TotalUp         int64
+	TotalDown       int64
 }
 
 func GenerateTrafficSnapshot() (TrafficSnapshot, error) {
@@ -68,16 +75,19 @@ func GenerateTrafficSnapshot() (TrafficSnapshot, error) {
 		return TrafficSnapshot{}, fmt.Errorf("network counter exceeds int64")
 	}
 	return TrafficSnapshot{
-		CapturedAt:     time.Now(),
-		CycleID:        snapshot.CycleID,
-		CycleStartedAt: snapshot.CycleStartedAt,
-		TotalUp:        int64(snapshot.TotalUp),
-		TotalDown:      int64(snapshot.TotalDown),
+		CapturedAt:      time.Now(),
+		CycleID:         snapshot.CycleID,
+		CycleStartedAt:  snapshot.CycleStartedAt,
+		LedgerEpoch:     snapshot.LedgerEpoch,
+		CycleGeneration: snapshot.CycleGeneration,
+		SampleSequence:  snapshot.SampleSequence,
+		TotalUp:         int64(snapshot.TotalUp),
+		TotalDown:       int64(snapshot.TotalDown),
 	}, nil
 }
 
-func ResetTraffic() (TrafficSnapshot, error) {
-	snapshot, err := unit.ResetNetworkTraffic()
+func ResetTraffic(operationID string) (TrafficSnapshot, error) {
+	snapshot, err := unit.ResetNetworkTraffic(operationID)
 	if err != nil {
 		return TrafficSnapshot{}, err
 	}
@@ -85,7 +95,8 @@ func ResetTraffic() (TrafficSnapshot, error) {
 		return TrafficSnapshot{}, fmt.Errorf("network counter exceeds int64")
 	}
 	return TrafficSnapshot{
-		CapturedAt: time.Now(), CycleID: snapshot.CycleID, CycleStartedAt: snapshot.CycleStartedAt,
+		CapturedAt: time.Now(), CycleID: snapshot.CycleID, CycleStartedAt: snapshot.CycleStartedAt, LedgerEpoch: snapshot.LedgerEpoch,
+		CycleGeneration: snapshot.CycleGeneration, SampleSequence: snapshot.SampleSequence,
 		TotalUp: int64(snapshot.TotalUp), TotalDown: int64(snapshot.TotalDown),
 	}, nil
 }
@@ -97,6 +108,7 @@ func ConfigureNetworkTraffic(config trafficledger.Config) (trafficledger.Snapsho
 func GenerateReport() []byte {
 	message := ""
 	data := report{}
+	capturedAt := time.Now()
 
 	cpu := unit.Cpu()
 	cpuUsage := cpu.CPUUsage
@@ -124,6 +136,9 @@ func GenerateReport() []byte {
 	data.Network = networkReport{
 		Up: networkUp, Down: networkDown, TotalUp: totalUp, TotalDown: totalDown,
 		CycleID: cycle.CycleID, CycleStartedAt: cycle.CycleStartedAt.Format(time.RFC3339Nano),
+		LedgerEpoch:     cycle.LedgerEpoch,
+		CycleGeneration: cycle.CycleGeneration, SampleSequence: cycle.SampleSequence,
+		CapturedAt: capturedAt.Format(time.RFC3339Nano),
 	}
 
 	tcpCount, udpCount, err := unit.ConnectionsCount()

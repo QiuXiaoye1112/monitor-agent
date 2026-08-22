@@ -3,11 +3,13 @@ package terminal
 import (
 	"encoding/json"
 	"fmt"
+	"sync"
 	"time"
 
 	"github.com/gorilla/websocket"
 
 	pkg_flags "monitor-agent/cmd/flags"
+	"monitor-agent/filemanager"
 )
 
 var flags = pkg_flags.GlobalConfig
@@ -30,10 +32,27 @@ type terminalImpl struct {
 
 // StartTerminal 启动终端并处理 WebSocket 通信
 func StartTerminal(conn *websocket.Conn) {
+	startTerminal(conn, nil)
+}
+
+func StartTerminalWithFileManager(conn *websocket.Conn) {
+	files, err := filemanager.NewSession()
+	if err != nil {
+		_ = conn.WriteMessage(websocket.TextMessage, []byte(fmt.Sprintf("Error: %v\r\n", err)))
+		_ = conn.Close()
+		return
+	}
+	startTerminal(conn, files)
+}
+
+func startTerminal(conn *websocket.Conn, files *filemanager.Session) {
 	if flags.DisableWebSsh {
 		conn.WriteMessage(websocket.TextMessage, []byte("\n\nWeb SSH is disabled. Enable it by running without the --disable-web-ssh flag."))
 		conn.Close()
 		return
+	}
+	if files != nil {
+		defer files.Close()
 	}
 	impl, err := newTerminalImpl()
 	if err != nil {
@@ -43,6 +62,41 @@ func StartTerminal(conn *websocket.Conn) {
 
 	errChan := make(chan error, 3) // 增加容量以容纳多个错误源
 	done := make(chan struct{})
+	var writeMu sync.Mutex
+	var fileQueue chan []byte
+	var fileWorkerDone chan struct{}
+	if files != nil {
+		fileQueue = make(chan []byte, 8)
+		fileWorkerDone = make(chan struct{})
+		go func() {
+			defer close(fileWorkerDone)
+			for payload := range fileQueue {
+				response := files.HandleMessage(payload)
+				if len(response) == 0 {
+					continue
+				}
+				writeMu.Lock()
+				err := conn.WriteMessage(websocket.TextMessage, response)
+				writeMu.Unlock()
+				if err != nil {
+					select {
+					case errChan <- err:
+					default:
+					}
+					return
+				}
+			}
+		}()
+		defer func() {
+			close(fileQueue)
+			<-fileWorkerDone
+		}()
+	}
+	if files != nil {
+		writeMu.Lock()
+		_ = conn.WriteMessage(websocket.TextMessage, files.InitialMessage())
+		writeMu.Unlock()
+	}
 
 	defer func() {
 		gracefulShutdown(impl.term)
@@ -52,10 +106,10 @@ func StartTerminal(conn *websocket.Conn) {
 	}()
 
 	// 从 WebSocket 读取消息并写入终端
-	go handleWebSocketInput(conn, impl.term, errChan, done)
+	go handleWebSocketInput(conn, impl.term, fileQueue, errChan, done)
 
 	// 从终端读取输出并写入 WebSocket
-	go handleTerminalOutput(conn, impl.term, errChan, done)
+	go handleTerminalOutput(conn, impl.term, &writeMu, errChan, done)
 
 	// 等待终端进程结束或出现错误
 	select {
@@ -90,7 +144,7 @@ func gracefulShutdown(term Terminal) {
 }
 
 // handleWebSocketInput 处理 WebSocket 输入
-func handleWebSocketInput(conn *websocket.Conn, term Terminal, errChan chan<- error, done <-chan struct{}) {
+func handleWebSocketInput(conn *websocket.Conn, term Terminal, fileQueue chan<- []byte, errChan chan<- error, done <-chan struct{}) {
 	for {
 		select {
 		case <-done:
@@ -123,9 +177,15 @@ func handleWebSocketInput(conn *websocket.Conn, term Terminal, errChan chan<- er
 					if cmd.Input != "" {
 						term.Write([]byte(cmd.Input))
 					}
+				default:
+					enqueueFileMessage(fileQueue, p, done)
 				}
 			} else {
-				term.Write(p)
+				if fileQueue != nil {
+					enqueueFileMessage(fileQueue, p, done)
+				} else {
+					term.Write(p)
+				}
 			}
 		}
 		if t == websocket.BinaryMessage {
@@ -134,8 +194,21 @@ func handleWebSocketInput(conn *websocket.Conn, term Terminal, errChan chan<- er
 	}
 }
 
+func enqueueFileMessage(fileQueue chan<- []byte, payload []byte, done <-chan struct{}) bool {
+	if fileQueue == nil {
+		return false
+	}
+	copyPayload := append([]byte(nil), payload...)
+	select {
+	case fileQueue <- copyPayload:
+		return true
+	case <-done:
+		return false
+	}
+}
+
 // handleTerminalOutput 处理终端输出
-func handleTerminalOutput(conn *websocket.Conn, term Terminal, errChan chan<- error, done <-chan struct{}) {
+func handleTerminalOutput(conn *websocket.Conn, term Terminal, writeMu *sync.Mutex, errChan chan<- error, done <-chan struct{}) {
 	buf := make([]byte, 4096)
 	for {
 		select {
@@ -152,7 +225,10 @@ func handleTerminalOutput(conn *websocket.Conn, term Terminal, errChan chan<- er
 			}
 			return
 		}
-		if err := conn.WriteMessage(websocket.BinaryMessage, buf[:n]); err != nil {
+		writeMu.Lock()
+		err = conn.WriteMessage(websocket.BinaryMessage, buf[:n])
+		writeMu.Unlock()
+		if err != nil {
 			select {
 			case errChan <- err:
 			default:

@@ -172,6 +172,34 @@ func TestV2ExecIsNotAcknowledgedWhenPersistenceFails(t *testing.T) {
 	}
 }
 
+func TestV2MalformedEventCanBeRetried(t *testing.T) {
+	const eventID = "malformed-event"
+	if processV2Event(nil, v2.MethodAgentTrafficReset, map[string]any{}, eventID) {
+		t.Fatal("malformed traffic reset was acknowledged")
+	}
+	if !markV2EventSeen(eventID) {
+		t.Fatal("malformed event remained marked as seen")
+	}
+	forgetV2EventSeen(eventID)
+}
+
+func TestV2EventResultIsCopiedAndExpires(t *testing.T) {
+	const eventID = "traffic-result-cache"
+	payload := []byte(`{"result":"ok"}`)
+	rememberV2EventResult(eventID, payload)
+	payload[0] = 'x'
+	got, ok := takeV2EventResult(eventID)
+	if !ok || string(got) != `{"result":"ok"}` {
+		t.Fatalf("cached payload = %q, ok=%v", got, ok)
+	}
+	v2ResultMu.Lock()
+	v2EventResults[eventID] = v2EventResult{payload: []byte("expired"), expiresAt: time.Now().Add(-time.Second)}
+	v2ResultMu.Unlock()
+	if _, ok := takeV2EventResult(eventID); ok {
+		t.Fatal("expired event result was replayed")
+	}
+}
+
 func TestCompletedTaskIsDeletedOnlyAfterHTTP200(t *testing.T) {
 	store, err := newTaskStore(filepath.Join(t.TempDir(), "tasks.json"))
 	if err != nil {

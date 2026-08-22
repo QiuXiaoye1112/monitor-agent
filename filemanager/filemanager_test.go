@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -15,6 +16,18 @@ func newTestService(t *testing.T) *service {
 	svc := &service{home: home, root: home, uploads: make(map[string]*uploadState), downloads: make(map[string]*downloadState)}
 	t.Cleanup(svc.close)
 	return svc
+}
+
+func TestSessionMultiplexesFileRequestResponses(t *testing.T) {
+	session := &Session{service: newTestService(t)}
+	initial := session.InitialMessage()
+	if len(initial) == 0 || !strings.Contains(string(initial), `"type":"system"`) {
+		t.Fatalf("unexpected initial session message: %s", initial)
+	}
+	response := session.HandleMessage([]byte(`{"id":"request-1","type":"ping"}`))
+	if !strings.Contains(string(response), `"type":"response"`) || !strings.Contains(string(response), `"id":"request-1"`) {
+		t.Fatalf("unexpected multiplexed response: %s", response)
+	}
 }
 
 func TestFileOperations(t *testing.T) {

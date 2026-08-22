@@ -131,13 +131,13 @@ var (
 func NetworkSpeed() (totalUp, totalDown, upSpeed, downSpeed uint64, err error) {
 	includeNics := parseNics(flags.IncludeNics)
 	excludeNics := parseNics(flags.ExcludeNics)
-	rawUp, rawDown, err := collectNetworkTotals(includeNics, excludeNics)
+	counters, _, _, err := collectNetworkCounters(includeNics, excludeNics)
 	if err != nil {
 		return 0, 0, 0, 0, err
 	}
 	now := time.Now()
-	upSpeed, downSpeed = updateNetworkSpeedSample(rawUp, rawDown, now)
-	snapshot, err := trafficledger.Observe(rawUp, rawDown, now)
+	upSpeed, downSpeed = updateNetworkSpeedSample(counters, now)
+	snapshot, err := trafficledger.ObserveInterfaces(counters, now)
 	if err != nil {
 		return snapshot.TotalUp, snapshot.TotalDown, upSpeed, downSpeed, fmt.Errorf("persist traffic ledger: %w", err)
 	}
@@ -146,11 +146,11 @@ func NetworkSpeed() (totalUp, totalDown, upSpeed, downSpeed uint64, err error) {
 
 // NetworkTotalsSnapshot samples the persistent traffic ledger immediately.
 func NetworkTotalsSnapshot() (totalUp, totalDown uint64, err error) {
-	rawUp, rawDown, err := collectNetworkTotals(parseNics(flags.IncludeNics), parseNics(flags.ExcludeNics))
+	counters, _, _, err := collectNetworkCounters(parseNics(flags.IncludeNics), parseNics(flags.ExcludeNics))
 	if err != nil {
 		return 0, 0, err
 	}
-	snapshot, err := trafficledger.Observe(rawUp, rawDown, time.Now())
+	snapshot, err := trafficledger.ObserveInterfaces(counters, time.Now())
 	if err != nil {
 		return 0, 0, err
 	}
@@ -165,60 +165,96 @@ func ConfigureNetworkTraffic(config trafficledger.Config) (trafficledger.Snapsho
 	return trafficledger.Configure(config, time.Now())
 }
 
-func ResetNetworkTraffic() (trafficledger.Snapshot, error) {
-	rawUp, rawDown, err := collectNetworkTotals(parseNics(flags.IncludeNics), parseNics(flags.ExcludeNics))
+func ResetNetworkTraffic(operationID string) (trafficledger.Snapshot, error) {
+	counters, _, _, err := collectNetworkCounters(parseNics(flags.IncludeNics), parseNics(flags.ExcludeNics))
 	if err != nil {
 		return trafficledger.Snapshot{}, err
 	}
-	return trafficledger.Reset(rawUp, rawDown, time.Now())
+	return trafficledger.ResetInterfacesForOperation(counters, operationID, time.Now())
 }
 
 func getNetworkSpeedFallback(includeNics, excludeNics map[string]struct{}) (totalUp, totalDown, upSpeed, downSpeed uint64, err error) {
-	totalUp, totalDown, err = collectNetworkTotals(includeNics, excludeNics)
+	counters, totalUp, totalDown, err := collectNetworkCounters(includeNics, excludeNics)
 	if err != nil {
 		return 0, 0, 0, 0, err
 	}
 
-	upSpeed, downSpeed = updateNetworkSpeedSample(totalUp, totalDown, time.Now())
+	upSpeed, downSpeed = updateNetworkSpeedSample(counters, time.Now())
 	return totalUp, totalDown, upSpeed, downSpeed, nil
 }
 
 func collectNetworkTotals(includeNics, excludeNics map[string]struct{}) (totalUp, totalDown uint64, err error) {
+	_, totalUp, totalDown, err = collectNetworkCounters(includeNics, excludeNics)
+	return totalUp, totalDown, err
+}
+
+func collectNetworkCounters(includeNics, excludeNics map[string]struct{}) (map[string]trafficledger.InterfaceCounter, uint64, uint64, error) {
 	ioCounters, err := net.IOCounters(true)
 	if err != nil {
-		return 0, 0, fmt.Errorf("failed to get network IO counters: %w", err)
+		return nil, 0, 0, fmt.Errorf("failed to get network IO counters: %w", err)
 	}
 
 	if len(ioCounters) == 0 {
-		return 0, 0, fmt.Errorf("no network interfaces found")
+		return nil, 0, 0, fmt.Errorf("no network interfaces found")
 	}
 
+	identities := networkInterfaceIdentities()
+	counters := make(map[string]trafficledger.InterfaceCounter)
+	var totalUp, totalDown uint64
 	for _, interfaceStats := range ioCounters {
 		if shouldInclude(interfaceStats.Name, includeNics, excludeNics) {
-			totalUp += interfaceStats.BytesSent
-			totalDown += interfaceStats.BytesRecv
+			counter := trafficledger.InterfaceCounter{Up: interfaceStats.BytesSent, Down: interfaceStats.BytesRecv}
+			identity := interfaceStats.Name
+			if resolved, ok := identities[interfaceStats.Name]; ok {
+				identity = resolved
+			}
+			counters[identity] = counter
+			totalUp = saturatingAdd(totalUp, counter.Up)
+			totalDown = saturatingAdd(totalDown, counter.Down)
 		}
 	}
 
-	return totalUp, totalDown, nil
+	return counters, totalUp, totalDown, nil
+}
+
+func networkInterfaceIdentities() map[string]string {
+	identities := make(map[string]string)
+	interfaces, err := net.Interfaces()
+	if err != nil {
+		return identities
+	}
+	for _, iface := range interfaces {
+		identity := networkInterfaceIdentity(iface.Name, iface.Index, iface.HardwareAddr)
+		identities[iface.Name] = identity
+	}
+	return identities
+}
+
+func networkInterfaceIdentity(name string, index int, hardwareAddr string) string {
+	return fmt.Sprintf("%s#%d#%s", name, index, strings.ToLower(hardwareAddr))
+}
+
+func saturatingAdd(left, right uint64) uint64 {
+	if ^uint64(0)-left < right {
+		return ^uint64(0)
+	}
+	return left + right
 }
 
 type networkSpeedState struct {
 	sync.Mutex
-	totalUp   uint64
-	totalDown uint64
+	counters  map[string]trafficledger.InterfaceCounter
 	sampledAt time.Time
 }
 
 var networkSpeedSample networkSpeedState
 
-func updateNetworkSpeedSample(totalUp, totalDown uint64, now time.Time) (upSpeed, downSpeed uint64) {
+func updateNetworkSpeedSample(counters map[string]trafficledger.InterfaceCounter, now time.Time) (upSpeed, downSpeed uint64) {
 	networkSpeedSample.Lock()
 	defer networkSpeedSample.Unlock()
 
 	if networkSpeedSample.sampledAt.IsZero() {
-		networkSpeedSample.totalUp = totalUp
-		networkSpeedSample.totalDown = totalDown
+		networkSpeedSample.counters = copyInterfaceCounters(counters)
 		networkSpeedSample.sampledAt = now
 		return 0, 0
 	}
@@ -228,14 +264,28 @@ func updateNetworkSpeedSample(totalUp, totalDown uint64, now time.Time) (upSpeed
 		return 0, 0
 	}
 
-	upDelta := safeCounterDelta(totalUp, networkSpeedSample.totalUp)
-	downDelta := safeCounterDelta(totalDown, networkSpeedSample.totalDown)
+	var upDelta, downDelta uint64
+	for name, counter := range counters {
+		previous, exists := networkSpeedSample.counters[name]
+		if !exists {
+			continue
+		}
+		upDelta = saturatingAdd(upDelta, safeCounterDelta(counter.Up, previous.Up))
+		downDelta = saturatingAdd(downDelta, safeCounterDelta(counter.Down, previous.Down))
+	}
 
-	networkSpeedSample.totalUp = totalUp
-	networkSpeedSample.totalDown = totalDown
+	networkSpeedSample.counters = copyInterfaceCounters(counters)
 	networkSpeedSample.sampledAt = now
 
 	return uint64(float64(upDelta) / elapsed), uint64(float64(downDelta) / elapsed)
+}
+
+func copyInterfaceCounters(counters map[string]trafficledger.InterfaceCounter) map[string]trafficledger.InterfaceCounter {
+	copyOf := make(map[string]trafficledger.InterfaceCounter, len(counters))
+	for name, counter := range counters {
+		copyOf[name] = counter
+	}
+	return copyOf
 }
 
 func safeCounterDelta(current, previous uint64) uint64 {

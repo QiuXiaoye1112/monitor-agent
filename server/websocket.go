@@ -27,6 +27,8 @@ var (
 	v2AckEventIDs           []string
 	v2SeenEvents            = make(map[string]struct{})
 	v2SeenOrder             []string
+	v2ResultMu              sync.Mutex
+	v2EventResults          = make(map[string]v2EventResult)
 	trafficReportBoundaryMu sync.Mutex
 )
 
@@ -37,6 +39,8 @@ const (
 	heartbeatTimeout          = 30 * time.Second
 	heartbeatWriteTimeout     = 5 * time.Second
 	websocketConnectTimeout   = 30 * time.Second
+	maxV2InboundMessageSize   = 4 << 20
+	v2EventResultTTL          = 5 * time.Minute
 )
 
 type heartbeatPong struct {
@@ -47,6 +51,11 @@ type heartbeatPong struct {
 type websocketInboundMessage struct {
 	conn    *ws.SafeConn
 	payload []byte
+}
+
+type v2EventResult struct {
+	payload   []byte
+	expiresAt time.Time
 }
 
 type connectionRetryState struct {
@@ -346,6 +355,44 @@ func addV2AckEventID(id string) {
 	v2AckEventIDs = append(v2AckEventIDs, id)
 }
 
+func rememberV2EventResult(id string, payload []byte) {
+	if id == "" || len(payload) == 0 {
+		return
+	}
+	v2ResultMu.Lock()
+	defer v2ResultMu.Unlock()
+	now := time.Now()
+	for eventID, result := range v2EventResults {
+		if !result.expiresAt.After(now) {
+			delete(v2EventResults, eventID)
+		}
+	}
+	if len(v2EventResults) >= maxRememberedV2Events {
+		return
+	}
+	v2EventResults[id] = v2EventResult{
+		payload:   append([]byte(nil), payload...),
+		expiresAt: now.Add(v2EventResultTTL),
+	}
+}
+
+func takeV2EventResult(id string) ([]byte, bool) {
+	if id == "" {
+		return nil, false
+	}
+	v2ResultMu.Lock()
+	defer v2ResultMu.Unlock()
+	result, ok := v2EventResults[id]
+	if !ok {
+		return nil, false
+	}
+	if !result.expiresAt.After(time.Now()) {
+		delete(v2EventResults, id)
+		return nil, false
+	}
+	return append([]byte(nil), result.payload...), true
+}
+
 func markV2EventSeen(id string) bool {
 	if id == "" {
 		return true
@@ -379,6 +426,7 @@ func connectWebSocket(websocketEndpoint string) (*ws.SafeConn, error) {
 	}
 
 	safeConn := ws.NewSafeConn(conn)
+	safeConn.SetReadLimit(maxV2InboundMessageSize)
 	return safeConn, nil
 }
 
@@ -428,10 +476,24 @@ func processWebSocketMessage(conn *ws.SafeConn, messageRaw []byte) {
 	}
 }
 
-func processV2Event(conn *ws.SafeConn, method string, params interface{}, eventID string) bool {
+func processV2Event(conn *ws.SafeConn, method string, params interface{}, eventID string) (processed bool) {
 	if !markV2EventSeen(eventID) {
+		if payload, ok := takeV2EventResult(eventID); ok {
+			if conn == nil {
+				return false
+			}
+			if err := conn.WriteMessage(websocket.TextMessage, payload); err != nil {
+				log.Printf("failed to replay v2 event result %s: %v", eventID, err)
+				return false
+			}
+		}
 		return true
 	}
+	defer func() {
+		if !processed {
+			forgetV2EventSeen(eventID)
+		}
+	}()
 	switch method {
 	case v2.MethodAgentExec:
 		var p struct {
@@ -466,7 +528,7 @@ func processV2Event(conn *ws.SafeConn, method string, params interface{}, eventI
 			RequestID string `json:"request_id"`
 		}
 		if err := v2.BindParams(params, &p); err == nil {
-			go establishTerminalConnection(flags.Token, p.RequestID, flags.Endpoint)
+			go establishWorkspaceConnection(flags.Token, p.RequestID, flags.Endpoint)
 			return true
 		} else {
 			log.Printf("bad v2 terminal params: %v", err)
@@ -516,6 +578,7 @@ func processV2Event(conn *ws.SafeConn, method string, params interface{}, eventI
 			forgetV2EventSeen(eventID)
 			return false
 		}
+		rememberV2EventResult(eventID, payload)
 		return true
 	case v2.MethodAgentTrafficConfig:
 		var p v2.TrafficConfigParams
@@ -538,7 +601,7 @@ func processV2Event(conn *ws.SafeConn, method string, params interface{}, eventI
 			return false
 		}
 		trafficReportBoundaryMu.Lock()
-		snapshot, err := monitoring.ResetTraffic()
+		snapshot, err := monitoring.ResetTraffic(p.OperationID)
 		if err != nil {
 			trafficReportBoundaryMu.Unlock()
 			log.Printf("failed to reset traffic ledger: %v", err)
@@ -566,6 +629,7 @@ func processV2Event(conn *ws.SafeConn, method string, params interface{}, eventI
 			forgetV2EventSeen(eventID)
 			return false
 		}
+		rememberV2EventResult(eventID, payload)
 		return true
 	case v2.MethodAgentMessage, v2.MethodAgentEvent:
 		log.Printf("received v2 %s: %+v", method, params)
@@ -617,11 +681,15 @@ func establishTerminalConnection(token, id, endpoint string) {
 		return
 	}
 
-	// 启动终端
-	terminal.StartTerminal(conn)
+	// 单连接承载终端命令和文件管理消息，由 Agent 统一分发。
+	terminal.StartTerminalWithFileManager(conn)
 	if conn != nil {
 		conn.Close()
 	}
+}
+
+func establishWorkspaceConnection(token, id, endpoint string) {
+	establishTerminalConnection(token, id, endpoint)
 }
 
 func establishFileConnection(token, id, endpoint string) {

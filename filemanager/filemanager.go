@@ -92,20 +92,76 @@ type service struct {
 	downloads map[string]*downloadState
 }
 
-func Start(conn *websocket.Conn) {
-	defer conn.Close()
-	conn.SetReadLimit(maxMessageSize)
+type Session struct {
+	service *service
+}
+
+func NewSession() (*Session, error) {
 	if flagsPkg.GlobalConfig.DisableWebSsh {
-		_ = conn.WriteJSON(response{Type: "system", OK: false, Error: "远程控制已在 Agent 中禁用"})
-		return
+		return nil, errors.New("远程控制已在 Agent 中禁用")
 	}
 	home, err := os.UserHomeDir()
 	if err != nil || home == "" {
 		home, _ = os.Getwd()
 	}
-	svc := &service{home: home, root: filesystemRoot(home), uploads: make(map[string]*uploadState), downloads: make(map[string]*downloadState)}
-	defer svc.close()
-	_ = conn.WriteJSON(response{Type: "system", OK: true, Data: map[string]interface{}{"home": home}})
+	return &Session{service: &service{
+		home:      home,
+		root:      filesystemRoot(home),
+		uploads:   make(map[string]*uploadState),
+		downloads: make(map[string]*downloadState),
+	}}, nil
+}
+
+func (s *Session) InitialMessage() []byte {
+	if s == nil || s.service == nil {
+		return nil
+	}
+	data, _ := json.Marshal(response{Type: "system", OK: true, Data: map[string]interface{}{"home": s.service.home}})
+	return data
+}
+
+func (s *Session) HandleMessage(payload []byte) []byte {
+	if s == nil || s.service == nil {
+		return nil
+	}
+	var req request
+	if err := json.Unmarshal(payload, &req); err != nil {
+		data, _ := json.Marshal(response{Type: "response", OK: false, Error: "请求格式错误"})
+		return data
+	}
+	data, err := s.service.handle(req)
+	resp := response{Type: "response", ID: req.ID, OK: err == nil, Data: data}
+	if err != nil {
+		log.Printf("file manager operation %q failed: %v", req.Type, err)
+		resp.Error, resp.Code, resp.Details = publicError(err)
+		resp.Data = nil
+	}
+	encoded, _ := json.Marshal(resp)
+	return encoded
+}
+
+func (s *Session) Close() {
+	if s != nil && s.service != nil {
+		s.service.close()
+	}
+}
+
+func Start(conn *websocket.Conn) {
+	conn.SetReadLimit(maxMessageSize)
+	if flagsPkg.GlobalConfig.DisableWebSsh {
+		_ = conn.WriteJSON(response{Type: "system", OK: false, Error: "远程控制已在 Agent 中禁用"})
+		_ = conn.Close()
+		return
+	}
+	session, err := NewSession()
+	if err != nil {
+		_ = conn.WriteJSON(response{Type: "system", OK: false, Error: err.Error()})
+		_ = conn.Close()
+		return
+	}
+	defer session.Close()
+	defer conn.Close()
+	_ = conn.WriteMessage(websocket.TextMessage, session.InitialMessage())
 	for {
 		messageType, payload, err := conn.ReadMessage()
 		if err != nil {
@@ -115,19 +171,7 @@ func Start(conn *websocket.Conn) {
 			_ = conn.WriteJSON(response{Type: "response", OK: false, Error: "只接受 JSON 请求"})
 			continue
 		}
-		var req request
-		if err := json.Unmarshal(payload, &req); err != nil {
-			_ = conn.WriteJSON(response{Type: "response", OK: false, Error: "请求格式错误"})
-			continue
-		}
-		data, err := svc.handle(req)
-		resp := response{Type: "response", ID: req.ID, OK: err == nil, Data: data}
-		if err != nil {
-			log.Printf("file manager operation %q failed: %v", req.Type, err)
-			resp.Error, resp.Code, resp.Details = publicError(err)
-			resp.Data = nil
-		}
-		if err := conn.WriteJSON(resp); err != nil {
+		if err := conn.WriteMessage(websocket.TextMessage, session.HandleMessage(payload)); err != nil {
 			return
 		}
 	}

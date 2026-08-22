@@ -1,6 +1,7 @@
 package server
 
 import (
+	"os"
 	"testing"
 	"time"
 )
@@ -18,6 +19,7 @@ var testTargets = []struct {
 }
 
 func TestICMPPing(t *testing.T) {
+	requireNetworkIntegration(t)
 	timeout := 3 * time.Second
 	for _, tt := range testTargets {
 		t.Run(tt.target, func(t *testing.T) {
@@ -48,6 +50,7 @@ func TestTCPPing(t *testing.T) {
 }
 
 func TestHTTPPing(t *testing.T) {
+	requireNetworkIntegration(t)
 	timeout := 3 * time.Second
 	for _, tt := range testTargets {
 		t.Run(tt.target, func(t *testing.T) {
@@ -59,5 +62,12 @@ func TestHTTPPing(t *testing.T) {
 				t.Errorf("HTTP ping %s error: %v", tt.target, err)
 			}
 		})
+	}
+}
+
+func requireNetworkIntegration(t *testing.T) {
+	t.Helper()
+	if os.Getenv("MONITOR_AGENT_NETWORK_TESTS") != "1" {
+		t.Skip("requires external network access and raw ICMP socket permissions; set MONITOR_AGENT_NETWORK_TESTS=1 to run")
 	}
 }
