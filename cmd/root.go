@@ -16,7 +16,7 @@ import (
 
 	"github.com/spf13/cobra"
 	"monitor-agent/dnsresolver"
-	"monitor-agent/monitoring/netstatic"
+	"monitor-agent/monitoring/trafficledger"
 	monitoring "monitor-agent/monitoring/unit"
 	"monitor-agent/server"
 	"monitor-agent/update"
@@ -61,7 +61,7 @@ var RootCmd = &cobra.Command{
 		go func() {
 			<-stopCtx.Done()
 			log.Printf("shutting down gracefully...")
-			netstatic.Stop()
+			_ = trafficledger.Close()
 			os.Exit(0)
 		}()
 
@@ -74,21 +74,12 @@ var RootCmd = &cobra.Command{
 			go WarnMonitorRunning()
 		}
 
-		if flags.MonthRotate != 0 {
-			err := netstatic.StartOrContinue()
-			if err != nil {
-				log.Println("Failed to start netstatic monitoring:", err)
-			}
-			nics, err := monitoring.InterfaceList()
-			if err != nil {
-				log.Println("Failed to get interface list for netstatic:", err)
-			}
-			err = netstatic.SetNewConfig(netstatic.NetStaticConfig{
-				Nics: nics,
-			})
-			if err != nil {
-				log.Println("Failed to set netstatic config:", err)
-			}
+		if err := trafficledger.Initialize(flags.TrafficStatePath, trafficledger.Config{
+			Enabled:  flags.MonthRotate != 0,
+			Day:      flags.MonthRotate,
+			Timezone: "Asia/Shanghai",
+		}); err != nil {
+			return fmt.Errorf("failed to initialize traffic ledger: %w", err)
 		}
 
 		log.Println("Monitor Agent (final)")
@@ -169,6 +160,7 @@ func init() {
 	RootCmd.PersistentFlags().StringVar(&flags.ExcludeNics, "exclude-nics", "", "Comma-separated list of network interfaces to exclude")
 	RootCmd.PersistentFlags().StringVar(&flags.IncludeMountpoints, "include-mountpoint", "", "Semicolon-separated list of mount points to include for disk statistics")
 	RootCmd.PersistentFlags().IntVar(&flags.MonthRotate, "month-rotate", 0, "Month reset for network statistics (0 to disable)")
+	RootCmd.PersistentFlags().StringVar(&flags.TrafficStatePath, "traffic-state", "", "Persistent traffic ledger path")
 	RootCmd.PersistentFlags().StringVar(&flags.CFAccessClientID, "cf-access-client-id", "", "Cloudflare Access Client ID")
 	RootCmd.PersistentFlags().StringVar(&flags.CFAccessClientSecret, "cf-access-client-secret", "", "Cloudflare Access Client Secret")
 	RootCmd.PersistentFlags().BoolVar(&flags.MemoryIncludeCache, "memory-include-cache", false, "Include cache/buffer in memory usage")

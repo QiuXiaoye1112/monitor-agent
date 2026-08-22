@@ -15,6 +15,7 @@ import (
 	"monitor-agent/dnsresolver"
 	"monitor-agent/filemanager"
 	"monitor-agent/monitoring"
+	"monitor-agent/monitoring/trafficledger"
 	v2 "monitor-agent/protocol/v2"
 	"monitor-agent/terminal"
 	"monitor-agent/utils"
@@ -495,10 +496,12 @@ func processV2Event(conn *ws.SafeConn, method string, params interface{}, eventI
 			return false
 		}
 		result := v2.TrafficSnapshotResultParams{
-			OperationID: p.OperationID,
-			CapturedAt:  snapshot.CapturedAt.Format(time.RFC3339Nano),
-			TotalUp:     snapshot.TotalUp,
-			TotalDown:   snapshot.TotalDown,
+			OperationID:    p.OperationID,
+			CapturedAt:     snapshot.CapturedAt.Format(time.RFC3339Nano),
+			CycleID:        snapshot.CycleID,
+			CycleStartedAt: snapshot.CycleStartedAt.Format(time.RFC3339Nano),
+			TotalUp:        snapshot.TotalUp,
+			TotalDown:      snapshot.TotalDown,
 		}
 		payload := v2.NewNotification(v2.MethodAgentTrafficSnapshotResult, result)
 		if conn == nil {
@@ -510,6 +513,56 @@ func processV2Event(conn *ws.SafeConn, method string, params interface{}, eventI
 		trafficReportBoundaryMu.Unlock()
 		if err != nil {
 			log.Printf("failed to return traffic snapshot: %v", err)
+			forgetV2EventSeen(eventID)
+			return false
+		}
+		return true
+	case v2.MethodAgentTrafficConfig:
+		var p v2.TrafficConfigParams
+		if err := v2.BindParams(params, &p); err != nil {
+			log.Printf("bad v2 traffic config params: %v", err)
+			return false
+		}
+		if _, err := monitoring.ConfigureNetworkTraffic(trafficledger.Config{
+			Enabled: p.Enabled, Day: p.Day, Hour: p.Hour, Minute: p.Minute, Timezone: p.Timezone,
+		}); err != nil {
+			log.Printf("failed to configure traffic ledger: %v", err)
+			forgetV2EventSeen(eventID)
+			return false
+		}
+		return true
+	case v2.MethodAgentTrafficReset:
+		var p v2.TrafficResetParams
+		if err := v2.BindParams(params, &p); err != nil || p.OperationID == "" {
+			log.Printf("bad v2 traffic reset params: %v", err)
+			return false
+		}
+		trafficReportBoundaryMu.Lock()
+		snapshot, err := monitoring.ResetTraffic()
+		if err != nil {
+			trafficReportBoundaryMu.Unlock()
+			log.Printf("failed to reset traffic ledger: %v", err)
+			forgetV2EventSeen(eventID)
+			return false
+		}
+		result := v2.TrafficResetResultParams{
+			OperationID:    p.OperationID,
+			CapturedAt:     snapshot.CapturedAt.Format(time.RFC3339Nano),
+			CycleID:        snapshot.CycleID,
+			CycleStartedAt: snapshot.CycleStartedAt.Format(time.RFC3339Nano),
+			TotalUp:        snapshot.TotalUp,
+			TotalDown:      snapshot.TotalDown,
+		}
+		payload := v2.NewNotification(v2.MethodAgentTrafficResetResult, result)
+		if conn == nil {
+			trafficReportBoundaryMu.Unlock()
+			forgetV2EventSeen(eventID)
+			return false
+		}
+		err = conn.WriteMessage(websocket.TextMessage, payload)
+		trafficReportBoundaryMu.Unlock()
+		if err != nil {
+			log.Printf("failed to return traffic reset result: %v", err)
 			forgetV2EventSeen(eventID)
 			return false
 		}

@@ -11,8 +11,7 @@ import (
 	"time"
 
 	"github.com/shirou/gopsutil/v4/net"
-	"monitor-agent/monitoring/netstatic"
-	"monitor-agent/utils"
+	"monitor-agent/monitoring/trafficledger"
 )
 
 func ConnectionsCount() (tcpCount, udpCount int, err error) {
@@ -129,155 +128,49 @@ var (
 	}
 )
 
-// VnstatInterface represents a network interface in vnstat output
-type VnstatInterface struct {
-	Name    string        `json:"name"`
-	Alias   string        `json:"alias"`
-	Created VnstatDate    `json:"created"`
-	Updated VnstatUpdated `json:"updated"`
-	Traffic VnstatTraffic `json:"traffic"`
-}
-
-// VnstatDate represents date information
-type VnstatDate struct {
-	Date      VnstatDateInfo `json:"date"`
-	Timestamp int64          `json:"timestamp"`
-}
-
-// VnstatUpdated represents updated information
-type VnstatUpdated struct {
-	Date      VnstatDateInfo `json:"date"`
-	Time      VnstatTimeInfo `json:"time"`
-	Timestamp int64          `json:"timestamp"`
-}
-
-// VnstatDateInfo represents date components
-type VnstatDateInfo struct {
-	Year  int `json:"year"`
-	Month int `json:"month"`
-	Day   int `json:"day"`
-}
-
-// VnstatTimeInfo represents time components
-type VnstatTimeInfo struct {
-	Hour   int `json:"hour"`
-	Minute int `json:"minute"`
-}
-
-// VnstatTraffic represents traffic data from vnstat
-type VnstatTraffic struct {
-	Total      VnstatTotal        `json:"total"`
-	FiveMinute []VnstatTimeEntry  `json:"fiveminute"`
-	Hour       []VnstatTimeEntry  `json:"hour"`
-	Day        []VnstatTimeEntry  `json:"day"`
-	Month      []VnstatMonthEntry `json:"month"`
-	Year       []VnstatYearEntry  `json:"year"`
-	Top        []VnstatTimeEntry  `json:"top"`
-}
-
-// VnstatTotal represents total traffic data
-type VnstatTotal struct {
-	Rx uint64 `json:"rx"`
-	Tx uint64 `json:"tx"`
-}
-
-// VnstatTimeEntry represents a time-based traffic entry
-type VnstatTimeEntry struct {
-	ID        int            `json:"id"`
-	Date      VnstatDateInfo `json:"date"`
-	Time      VnstatTimeInfo `json:"time,omitempty"`
-	Timestamp int64          `json:"timestamp"`
-	Rx        uint64         `json:"rx"`
-	Tx        uint64         `json:"tx"`
-}
-
-// VnstatMonthEntry represents a monthly traffic entry
-type VnstatMonthEntry struct {
-	ID        int            `json:"id"`
-	Date      VnstatDateInfo `json:"date"`
-	Timestamp int64          `json:"timestamp"`
-	Rx        uint64         `json:"rx"`
-	Tx        uint64         `json:"tx"`
-}
-
-// VnstatYearEntry represents a yearly traffic entry
-type VnstatYearEntry struct {
-	ID        int            `json:"id"`
-	Date      VnstatDateInfo `json:"date"`
-	Timestamp int64          `json:"timestamp"`
-	Rx        uint64         `json:"rx"`
-	Tx        uint64         `json:"tx"`
-}
-
-// VnstatOutput represents the complete vnstat JSON output
-type VnstatOutput struct {
-	VnstatVersion string            `json:"vnstatversion"`
-	JsonVersion   string            `json:"jsonversion"`
-	Interfaces    []VnstatInterface `json:"interfaces"`
-}
-
 func NetworkSpeed() (totalUp, totalDown, upSpeed, downSpeed uint64, err error) {
 	includeNics := parseNics(flags.IncludeNics)
 	excludeNics := parseNics(flags.ExcludeNics)
-
-	// 如果设置了月重置（非0），统计totalUp、totalDown
-	if flags.MonthRotate != 0 {
-		totalUp, totalDown, err = networkTotals(false, includeNics, excludeNics)
-		if err != nil {
-			// 如果netstatic失败，回退到原来的方法，并返回额外的错误信息
-			fallbackUp, fallbackDown, fallbackUpSpeed, fallbackDownSpeed, fallbackErr := getNetworkSpeedFallback(includeNics, excludeNics)
-			if fallbackErr != nil {
-				return fallbackUp, fallbackDown, fallbackUpSpeed, fallbackDownSpeed, fmt.Errorf("failed to collect monthly traffic: %v; fallback error: %w", err, fallbackErr)
-			}
-			return fallbackUp, fallbackDown, fallbackUpSpeed, fallbackDownSpeed, fmt.Errorf("failed to collect monthly traffic: %w", err)
-		}
-
-		// 对于实时速度，仍然使用网卡累计计数器差值
-		_, _, upSpeed, downSpeed, err = getNetworkSpeedFallback(includeNics, excludeNics)
-		if err != nil {
-			return totalUp, totalDown, 0, 0, err
-		}
-
-		return totalUp, totalDown, upSpeed, downSpeed, nil
+	rawUp, rawDown, err := collectNetworkTotals(includeNics, excludeNics)
+	if err != nil {
+		return 0, 0, 0, 0, err
 	}
-
-	// 如果没有设置月重置，使用原来的方法
-	return getNetworkSpeedFallback(includeNics, excludeNics)
+	now := time.Now()
+	upSpeed, downSpeed = updateNetworkSpeedSample(rawUp, rawDown, now)
+	snapshot, err := trafficledger.Observe(rawUp, rawDown, now)
+	if err != nil {
+		return snapshot.TotalUp, snapshot.TotalDown, upSpeed, downSpeed, fmt.Errorf("persist traffic ledger: %w", err)
+	}
+	return snapshot.TotalUp, snapshot.TotalDown, upSpeed, downSpeed, nil
 }
 
-// NetworkTotalsSnapshot returns the same cumulative counters used by regular
-// reports, but forces the monthly sampler to the current instant when enabled.
+// NetworkTotalsSnapshot samples the persistent traffic ledger immediately.
 func NetworkTotalsSnapshot() (totalUp, totalDown uint64, err error) {
-	return networkTotals(
-		true,
-		parseNics(flags.IncludeNics),
-		parseNics(flags.ExcludeNics),
-	)
-}
-
-func networkTotals(forceSample bool, includeNics, excludeNics map[string]struct{}) (totalUp, totalDown uint64, err error) {
-	if flags.MonthRotate == 0 {
-		return collectNetworkTotals(includeNics, excludeNics)
-	}
-	if err := netstatic.StartOrContinue(); err != nil {
-		return 0, 0, err
-	}
-	if forceSample {
-		netstatic.SampleNow()
-	}
-	now := uint64(time.Now().Unix())
-	resetDay := uint64(utils.GetLastResetDate(flags.MonthRotate, time.Now()).Unix())
-	nicStatics, err := netstatic.GetTotalTrafficBetween(resetDay, now)
+	rawUp, rawDown, err := collectNetworkTotals(parseNics(flags.IncludeNics), parseNics(flags.ExcludeNics))
 	if err != nil {
 		return 0, 0, err
 	}
-	for interfaceName, stats := range nicStatics {
-		if shouldInclude(interfaceName, includeNics, excludeNics) {
-			totalUp += stats.Tx
-			totalDown += stats.Rx
-		}
+	snapshot, err := trafficledger.Observe(rawUp, rawDown, time.Now())
+	if err != nil {
+		return 0, 0, err
 	}
-	return totalUp, totalDown, nil
+	return snapshot.TotalUp, snapshot.TotalDown, nil
+}
+
+func NetworkTrafficSnapshot() (trafficledger.Snapshot, error) {
+	return trafficledger.SnapshotNow(time.Now())
+}
+
+func ConfigureNetworkTraffic(config trafficledger.Config) (trafficledger.Snapshot, error) {
+	return trafficledger.Configure(config, time.Now())
+}
+
+func ResetNetworkTraffic() (trafficledger.Snapshot, error) {
+	rawUp, rawDown, err := collectNetworkTotals(parseNics(flags.IncludeNics), parseNics(flags.ExcludeNics))
+	if err != nil {
+		return trafficledger.Snapshot{}, err
+	}
+	return trafficledger.Reset(rawUp, rawDown, time.Now())
 }
 
 func getNetworkSpeedFallback(includeNics, excludeNics map[string]struct{}) (totalUp, totalDown, upSpeed, downSpeed uint64, err error) {

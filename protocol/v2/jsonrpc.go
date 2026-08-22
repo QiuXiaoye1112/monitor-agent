@@ -23,6 +23,9 @@ const (
 	MethodAgentPull                  = "agent.pull"
 	MethodAgentTrafficSnapshot       = "agent.trafficSnapshot"
 	MethodAgentTrafficSnapshotResult = "agent.trafficSnapshotResult"
+	MethodAgentTrafficConfig         = "agent.trafficConfig"
+	MethodAgentTrafficReset          = "agent.trafficReset"
+	MethodAgentTrafficResetResult    = "agent.trafficResetResult"
 )
 
 type Request struct {
@@ -64,11 +67,27 @@ type TrafficSnapshotParams struct {
 }
 
 type TrafficSnapshotResultParams struct {
-	OperationID string `json:"operation_id"`
-	CapturedAt  string `json:"captured_at"`
-	TotalUp     int64  `json:"total_up"`
-	TotalDown   int64  `json:"total_down"`
+	OperationID    string `json:"operation_id"`
+	CapturedAt     string `json:"captured_at"`
+	CycleID        string `json:"cycle_id"`
+	CycleStartedAt string `json:"cycle_started_at"`
+	TotalUp        int64  `json:"total_up"`
+	TotalDown      int64  `json:"total_down"`
 }
+
+type TrafficConfigParams struct {
+	Enabled  bool   `json:"enabled"`
+	Day      int    `json:"day"`
+	Hour     int    `json:"hour"`
+	Minute   int    `json:"minute"`
+	Timezone string `json:"timezone"`
+}
+
+type TrafficResetParams struct {
+	OperationID string `json:"operation_id"`
+}
+
+type TrafficResetResultParams = TrafficSnapshotResultParams
 
 func NewNotification(method string, params interface{}) []byte {
 	payload, _ := json.Marshal(Request{JSONRPC: Version, Method: method, Params: params})

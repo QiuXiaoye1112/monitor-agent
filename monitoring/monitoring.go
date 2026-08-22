@@ -7,6 +7,7 @@ import (
 	"math"
 	"time"
 
+	"monitor-agent/monitoring/trafficledger"
 	unit "monitor-agent/monitoring/unit"
 )
 
@@ -33,10 +34,12 @@ type usageReport struct {
 }
 
 type networkReport struct {
-	Up        uint64 `json:"up"`
-	Down      uint64 `json:"down"`
-	TotalUp   uint64 `json:"totalUp"`
-	TotalDown uint64 `json:"totalDown"`
+	Up             uint64 `json:"up"`
+	Down           uint64 `json:"down"`
+	TotalUp        uint64 `json:"totalUp"`
+	TotalDown      uint64 `json:"totalDown"`
+	CycleID        string `json:"cycleId"`
+	CycleStartedAt string `json:"cycleStartedAt"`
 }
 
 type connectionsReport struct {
@@ -45,24 +48,50 @@ type connectionsReport struct {
 }
 
 type TrafficSnapshot struct {
-	CapturedAt time.Time
-	TotalUp    int64
-	TotalDown  int64
+	CapturedAt     time.Time
+	CycleID        string
+	CycleStartedAt time.Time
+	TotalUp        int64
+	TotalDown      int64
 }
 
 func GenerateTrafficSnapshot() (TrafficSnapshot, error) {
-	totalUp, totalDown, err := unit.NetworkTotalsSnapshot()
+	_, _, err := unit.NetworkTotalsSnapshot()
 	if err != nil {
 		return TrafficSnapshot{}, err
 	}
-	if totalUp > math.MaxInt64 || totalDown > math.MaxInt64 {
+	snapshot, err := unit.NetworkTrafficSnapshot()
+	if err != nil {
+		return TrafficSnapshot{}, err
+	}
+	if snapshot.TotalUp > math.MaxInt64 || snapshot.TotalDown > math.MaxInt64 {
 		return TrafficSnapshot{}, fmt.Errorf("network counter exceeds int64")
 	}
 	return TrafficSnapshot{
-		CapturedAt: time.Now(),
-		TotalUp:    int64(totalUp),
-		TotalDown:  int64(totalDown),
+		CapturedAt:     time.Now(),
+		CycleID:        snapshot.CycleID,
+		CycleStartedAt: snapshot.CycleStartedAt,
+		TotalUp:        int64(snapshot.TotalUp),
+		TotalDown:      int64(snapshot.TotalDown),
 	}, nil
+}
+
+func ResetTraffic() (TrafficSnapshot, error) {
+	snapshot, err := unit.ResetNetworkTraffic()
+	if err != nil {
+		return TrafficSnapshot{}, err
+	}
+	if snapshot.TotalUp > math.MaxInt64 || snapshot.TotalDown > math.MaxInt64 {
+		return TrafficSnapshot{}, fmt.Errorf("network counter exceeds int64")
+	}
+	return TrafficSnapshot{
+		CapturedAt: time.Now(), CycleID: snapshot.CycleID, CycleStartedAt: snapshot.CycleStartedAt,
+		TotalUp: int64(snapshot.TotalUp), TotalDown: int64(snapshot.TotalDown),
+	}, nil
+}
+
+func ConfigureNetworkTraffic(config trafficledger.Config) (trafficledger.Snapshot, error) {
+	return unit.ConfigureNetworkTraffic(config)
 }
 
 func GenerateReport() []byte {
@@ -88,7 +117,14 @@ func GenerateReport() []byte {
 	if err != nil {
 		message += fmt.Sprintf("failed to get network speed: %v\n", err)
 	}
-	data.Network = networkReport{Up: networkUp, Down: networkDown, TotalUp: totalUp, TotalDown: totalDown}
+	cycle, cycleErr := unit.NetworkTrafficSnapshot()
+	if cycleErr != nil {
+		message += fmt.Sprintf("failed to read traffic cycle: %v\n", cycleErr)
+	}
+	data.Network = networkReport{
+		Up: networkUp, Down: networkDown, TotalUp: totalUp, TotalDown: totalDown,
+		CycleID: cycle.CycleID, CycleStartedAt: cycle.CycleStartedAt.Format(time.RFC3339Nano),
+	}
 
 	tcpCount, udpCount, err := unit.ConnectionsCount()
 	if err != nil {

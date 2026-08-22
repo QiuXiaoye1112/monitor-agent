@@ -228,67 +228,18 @@ func TestNetworkSpeedFallback(t *testing.T) {
 		totalUp, totalDown, upSpeed, downSpeed)
 }
 
-func TestNetworkSpeedWithoutMonthRotate(t *testing.T) {
-
-	flags.MonthRotate = 1
-
-	// 设置测试值
-	flags.IncludeNics = ""
-	flags.ExcludeNics = ""
-
-	totalUp, totalDown, upSpeed, downSpeed, err := NetworkSpeed()
-	if err != nil {
-		t.Fatalf("NetworkSpeed failed: %v", err)
-	}
-
-	t.Logf("Without MonthRotate - TotalUp: %d, TotalDown: %d, UpSpeed: %d/s, DownSpeed: %d/s",
-		totalUp, totalDown, upSpeed, downSpeed)
-}
-
-func TestNetworkSpeedWithMonthRotate(t *testing.T) {
-	// 保存原始值
-	originalMonthRotate := flags.MonthRotate
-	originalIncludeNics := flags.IncludeNics
-	originalExcludeNics := flags.ExcludeNics
-
-	// 恢复原始值
-	defer func() {
-		flags.MonthRotate = originalMonthRotate
-		flags.IncludeNics = originalIncludeNics
-		flags.ExcludeNics = originalExcludeNics
-	}()
-
-	// 设置测试值 - 启用月重置
-	flags.MonthRotate = 1
-	flags.IncludeNics = ""
-	flags.ExcludeNics = ""
-
-	totalUp, totalDown, upSpeed, downSpeed, err := NetworkSpeed()
-
-	// 如果vnstat不可用，可能会回退到原来的方法，这是正常的
-	if err != nil {
-		t.Fatalf("NetworkSpeed failed: %v", err)
-	}
-
-	t.Logf("With MonthRotate - TotalUp: %d, TotalDown: %d, UpSpeed: %d/s, DownSpeed: %d/s",
-		totalUp, totalDown, upSpeed, downSpeed)
-}
-
 func TestNetworkSpeedWithNicFilters(t *testing.T) {
 	// 保存原始值
-	originalMonthRotate := flags.MonthRotate
 	originalIncludeNics := flags.IncludeNics
 	originalExcludeNics := flags.ExcludeNics
 
 	// 恢复原始值
 	defer func() {
-		flags.MonthRotate = originalMonthRotate
 		flags.IncludeNics = originalIncludeNics
 		flags.ExcludeNics = originalExcludeNics
 	}()
 
 	// 测试排除回环接口
-	flags.MonthRotate = 0
 	flags.IncludeNics = ""
 	flags.ExcludeNics = "lo,docker0"
 
