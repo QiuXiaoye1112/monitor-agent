@@ -14,7 +14,6 @@ type Config struct {
 	IncludeNics          string  `json:"include_nics" env:"AGENT_INCLUDE_NICS"`                       // 仅统计网卡，逗号分隔的网卡名称列表，支持通配符
 	ExcludeNics          string  `json:"exclude_nics" env:"AGENT_EXCLUDE_NICS"`                       // 统计时排除的网卡，逗号分隔的网卡名称列表，支持通配符
 	IncludeMountpoints   string  `json:"include_mountpoints" env:"AGENT_INCLUDE_MOUNTPOINTS"`         // 磁盘统计的包含挂载点列表，使用分号分隔
-	MonthRotate          int     `json:"month_rotate" env:"AGENT_MONTH_ROTATE"`                       // 流量统计的月份重置日期（0表示禁用）
 	TrafficStatePath     string  `json:"traffic_state_path" env:"AGENT_TRAFFIC_STATE_PATH"`           // 流量账本持久化路径
 	CFAccessClientID     string  `json:"cf_access_client_id" env:"AGENT_CF_ACCESS_CLIENT_ID"`         // Cloudflare Access Client ID
 	CFAccessClientSecret string  `json:"cf_access_client_secret" env:"AGENT_CF_ACCESS_CLIENT_SECRET"` // Cloudflare Access Client Secret

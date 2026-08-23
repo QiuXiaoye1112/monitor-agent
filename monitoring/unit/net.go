@@ -161,10 +161,6 @@ func NetworkTrafficSnapshot() (trafficledger.Snapshot, error) {
 	return trafficledger.SnapshotNow(time.Now())
 }
 
-func ConfigureNetworkTraffic(config trafficledger.Config) (trafficledger.Snapshot, error) {
-	return trafficledger.Configure(config, time.Now())
-}
-
 func ResetNetworkTraffic(operationID string) (trafficledger.Snapshot, error) {
 	counters, _, _, err := collectNetworkCounters(parseNics(flags.IncludeNics), parseNics(flags.ExcludeNics))
 	if err != nil {

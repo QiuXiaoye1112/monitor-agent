@@ -15,7 +15,6 @@ import (
 	"monitor-agent/dnsresolver"
 	"monitor-agent/filemanager"
 	"monitor-agent/monitoring"
-	"monitor-agent/monitoring/trafficledger"
 	v2 "monitor-agent/protocol/v2"
 	"monitor-agent/terminal"
 	"monitor-agent/utils"
@@ -579,20 +578,6 @@ func processV2Event(conn *ws.SafeConn, method string, params interface{}, eventI
 			return false
 		}
 		rememberV2EventResult(eventID, payload)
-		return true
-	case v2.MethodAgentTrafficConfig:
-		var p v2.TrafficConfigParams
-		if err := v2.BindParams(params, &p); err != nil {
-			log.Printf("bad v2 traffic config params: %v", err)
-			return false
-		}
-		if _, err := monitoring.ConfigureNetworkTraffic(trafficledger.Config{
-			Enabled: p.Enabled, Day: p.Day, Hour: p.Hour, Minute: p.Minute, Timezone: p.Timezone,
-		}); err != nil {
-			log.Printf("failed to configure traffic ledger: %v", err)
-			forgetV2EventSeen(eventID)
-			return false
-		}
 		return true
 	case v2.MethodAgentTrafficReset:
 		var p v2.TrafficResetParams

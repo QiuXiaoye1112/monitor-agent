@@ -1,6 +1,7 @@
 package trafficledger
 
 import (
+	"os"
 	"path/filepath"
 	"testing"
 	"time"
@@ -8,32 +9,27 @@ import (
 
 func TestLedgerPersistsAndSurvivesRawCounterReset(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "ledger.json")
-	config := Config{Enabled: true, Day: 15, Hour: 8, Minute: 30, Timezone: "Asia/Shanghai"}
 	start := time.Date(2026, 8, 16, 0, 0, 0, 0, time.UTC)
-	ledger, err := Open(path, config)
+	ledger, err := Open(path)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err = ledger.Observe(100, 200, start); err != nil {
+	if _, err := ledger.Observe(100, 200, start); err != nil {
 		t.Fatal(err)
 	}
 	got, err := ledger.Observe(160, 290, start.Add(time.Minute))
-	if err != nil {
-		t.Fatal(err)
-	}
-	if got.TotalUp != 60 || got.TotalDown != 90 {
-		t.Fatalf("totals = %d/%d", got.TotalUp, got.TotalDown)
+	if err != nil || got.TotalUp != 60 || got.TotalDown != 90 {
+		t.Fatalf("totals = %+v, err=%v", got, err)
 	}
 	if err = ledger.saveLocked(start.Add(time.Minute)); err != nil {
 		t.Fatal(err)
 	}
-
-	reloaded, err := Open(path, Config{})
+	reloaded, err := Open(path)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if reloaded.state.LedgerEpoch == "" || reloaded.state.LedgerEpoch == ledger.state.LedgerEpoch {
-		t.Fatalf("process restart did not create a new report epoch: %q vs %q", reloaded.state.LedgerEpoch, ledger.state.LedgerEpoch)
+		t.Fatal("process restart did not create a new report epoch")
 	}
 	got, err = reloaded.Observe(10, 20, start.Add(2*time.Minute))
 	if err != nil {
@@ -51,142 +47,106 @@ func TestLedgerPersistsAndSurvivesRawCounterReset(t *testing.T) {
 	}
 }
 
-func TestLedgerRotatesAtConfiguredMinute(t *testing.T) {
-	ledger := newMemoryLedger(Config{Enabled: true, Day: 15, Hour: 8, Minute: 30, Timezone: "Asia/Shanghai"})
-	before := time.Date(2026, 8, 15, 0, 29, 59, 0, time.UTC)
-	if _, err := ledger.Observe(100, 200, before); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := ledger.Observe(140, 260, before.Add(500*time.Millisecond)); err != nil {
-		t.Fatal(err)
-	}
-	after, err := ledger.Observe(150, 275, before.Add(2*time.Second))
-	if err != nil {
-		t.Fatal(err)
-	}
-	if after.TotalUp != 0 || after.TotalDown != 0 {
-		t.Fatalf("new cycle totals = %d/%d", after.TotalUp, after.TotalDown)
-	}
-	if want := time.Date(2026, 8, 15, 0, 30, 0, 0, time.UTC); !after.CycleStartedAt.Equal(want) {
-		t.Fatalf("cycle start = %s, want %s", after.CycleStartedAt, want)
-	}
-}
-
-func TestConfigureAndManualResetStartFreshLedger(t *testing.T) {
-	ledger := newMemoryLedger(Config{})
+func TestManualResetStartsFreshCycle(t *testing.T) {
+	ledger := newMemoryLedger()
 	now := time.Date(2026, 8, 1, 0, 0, 0, 0, time.UTC)
-	_, _ = ledger.Observe(100, 200, now)
-	_, _ = ledger.Observe(150, 260, now.Add(time.Minute))
-	configured, err := ledger.Configure(Config{Enabled: true, Day: 1, Timezone: "UTC"}, now.Add(2*time.Minute))
-	if err != nil {
-		t.Fatal(err)
-	}
-	if configured.TotalUp != 0 || configured.TotalDown != 0 {
-		t.Fatal("configuration did not reset ledger")
-	}
-	reset, err := ledger.Reset(175, 300, now.Add(3*time.Minute))
-	if err != nil {
-		t.Fatal(err)
-	}
-	if reset.TotalUp != 0 || reset.TotalDown != 0 || reset.CycleID == "" {
-		t.Fatalf("bad reset: %+v", reset)
-	}
-}
-
-func TestLedgerGenerationAndSampleSequenceAdvanceAcrossReset(t *testing.T) {
-	ledger := newMemoryLedger(Config{Enabled: true, Day: 1, Timezone: "UTC"})
-	now := time.Date(2026, time.August, 2, 0, 0, 0, 0, time.UTC)
 	first, err := ledger.Observe(100, 200, now)
 	if err != nil {
 		t.Fatal(err)
 	}
-	second, err := ledger.Observe(110, 220, now.Add(time.Minute))
+	second, err := ledger.Observe(150, 260, now.Add(time.Minute))
 	if err != nil {
 		t.Fatal(err)
 	}
-	if first.CycleGeneration != second.CycleGeneration || first.SampleSequence != 1 || second.SampleSequence != 2 {
+	if first.SampleSequence != 1 || second.SampleSequence != 2 {
 		t.Fatalf("sampling order = %+v then %+v", first, second)
 	}
-
-	reset, err := ledger.Reset(110, 220, now.Add(2*time.Minute))
+	reset, err := ledger.Reset(150, 260, now.Add(2*time.Minute))
 	if err != nil {
 		t.Fatal(err)
 	}
-	if reset.CycleGeneration <= second.CycleGeneration || reset.SampleSequence != 0 {
-		t.Fatalf("reset did not advance generation: %+v", reset)
+	if reset.TotalUp != 0 || reset.TotalDown != 0 || reset.CycleGeneration <= second.CycleGeneration || reset.SampleSequence != 0 {
+		t.Fatalf("bad reset: %+v", reset)
 	}
-	after, err := ledger.Observe(120, 240, now.Add(3*time.Minute))
+	after, err := ledger.Observe(160, 280, now.Add(3*time.Minute))
 	if err != nil {
 		t.Fatal(err)
 	}
-	if after.CycleGeneration != reset.CycleGeneration || after.SampleSequence != 1 {
-		t.Fatalf("post-reset sequence = %+v", after)
+	if after.TotalUp != 10 || after.TotalDown != 20 || after.SampleSequence != 1 {
+		t.Fatalf("post-reset snapshot = %+v", after)
 	}
 }
 
-func TestRepeatedConfigLeavesBoundaryRotationToRawObservation(t *testing.T) {
-	config := Config{Enabled: true, Day: 15, Hour: 8, Minute: 30, Timezone: "Asia/Shanghai"}
-	ledger := newMemoryLedger(config)
-	before := time.Date(2026, 8, 15, 0, 29, 59, 0, time.UTC)
-	_, _ = ledger.Observe(100, 200, before)
-	_, _ = ledger.Observe(140, 260, before.Add(500*time.Millisecond))
-
-	configured, err := ledger.Configure(config, before.Add(2*time.Second))
+func TestLedgerDoesNotRotateAtCalendarBoundary(t *testing.T) {
+	ledger := newMemoryLedger()
+	before := time.Date(2026, time.August, 31, 23, 59, 0, 0, time.UTC)
+	first, err := ledger.Observe(100, 200, before)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if configured.TotalUp != 40 || configured.TotalDown != 60 {
-		t.Fatalf("idempotent config changed totals to %d/%d", configured.TotalUp, configured.TotalDown)
-	}
-
-	after, err := ledger.Observe(150, 275, before.Add(3*time.Second))
+	after, err := ledger.Observe(150, 275, before.Add(2*time.Minute))
 	if err != nil {
 		t.Fatal(err)
 	}
-	if after.TotalUp != 0 || after.TotalDown != 0 {
-		t.Fatalf("new cycle totals = %d/%d", after.TotalUp, after.TotalDown)
+	if after.CycleID != first.CycleID || after.CycleGeneration != first.CycleGeneration {
+		t.Fatalf("calendar boundary changed manual cycle: before=%+v after=%+v", first, after)
+	}
+	if after.TotalUp != 50 || after.TotalDown != 75 {
+		t.Fatalf("calendar boundary totals = %d/%d", after.TotalUp, after.TotalDown)
+	}
+}
+
+func TestOpenPreservesLegacyConfiguredLedgerWithoutFutureRotation(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "legacy-ledger.json")
+	legacy := `{"version":1,"config":{"enabled":true,"day":1,"hour":0,"minute":0,"timezone":"Asia/Shanghai"},"ledger_epoch":"old","cycle_id":"2026-08-01T00:00:00Z","cycle_started_at":"2026-08-01T00:00:00Z","cycle_generation":7,"sample_sequence":4,"total_up":600,"total_down":900,"last_raw_up":1000,"last_raw_down":2000,"has_raw":true,"last_observed_at":"2026-08-31T23:59:00Z"}`
+	if err := os.WriteFile(path, []byte(legacy), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	ledger, err := Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got, err := ledger.Observe(1050, 2075, time.Date(2026, time.September, 1, 0, 1, 0, 0, time.UTC))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.CycleID != "2026-08-01T00:00:00Z" || got.CycleGeneration != 7 {
+		t.Fatalf("legacy cycle changed during upgrade: %+v", got)
+	}
+	if got.TotalUp != 650 || got.TotalDown != 975 {
+		t.Fatalf("legacy totals were not preserved: %+v", got)
 	}
 }
 
 func TestObserveReturnsInMemoryTotalsWhenPersistenceFails(t *testing.T) {
-	ledger := newMemoryLedger(Config{})
-	ledger.path = t.TempDir() // Renaming the temporary file over this directory must fail.
+	ledger := newMemoryLedger()
+	ledger.path = t.TempDir()
 	now := time.Date(2026, 8, 1, 0, 0, 0, 0, time.UTC)
 	ledger.state.LastRawUp = 100
 	ledger.state.LastRawDown = 200
 	ledger.state.HasRaw = true
-
 	snapshot, err := ledger.Observe(150, 275, now)
-	if err == nil {
-		t.Fatal("expected persistence failure")
-	}
-	if snapshot.TotalUp != 50 || snapshot.TotalDown != 75 {
-		t.Fatalf("lost in-memory totals after persistence error: %+v", snapshot)
+	if err == nil || snapshot.TotalUp != 50 || snapshot.TotalDown != 75 {
+		t.Fatalf("snapshot=%+v err=%v", snapshot, err)
 	}
 }
 
 func TestLedgerUsesPerInterfaceBaselines(t *testing.T) {
-	ledger := newMemoryLedger(Config{})
+	ledger := newMemoryLedger()
 	now := time.Date(2026, time.August, 1, 0, 0, 0, 0, time.UTC)
-
-	if _, err := ledger.ObserveInterfaces(map[string]InterfaceCounter{
-		"eth0": {Up: 100, Down: 200},
-	}, now); err != nil {
+	if _, err := ledger.ObserveInterfaces(map[string]InterfaceCounter{"eth0": {Up: 100, Down: 200}}, now); err != nil {
 		t.Fatal(err)
 	}
 	first, err := ledger.ObserveInterfaces(map[string]InterfaceCounter{
 		"eth0": {Up: 160, Down: 260},
-		// A newly discovered interface may already contain a large historical
-		// counter and must not create a fake monthly spike.
 		"eth1": {Up: 1 << 40, Down: 1 << 40},
 	}, now.Add(time.Minute))
 	if err != nil {
 		t.Fatal(err)
 	}
 	if first.TotalUp != 60 || first.TotalDown != 60 {
-		t.Fatalf("new interface was counted as historical traffic: %+v", first)
+		t.Fatalf("new interface counted historical traffic: %+v", first)
 	}
-
 	second, err := ledger.ObserveInterfaces(map[string]InterfaceCounter{
 		"eth0": {Up: 170, Down: 280},
 		"eth1": {Up: 1<<40 + 10, Down: 1<<40 + 20},
@@ -197,7 +157,6 @@ func TestLedgerUsesPerInterfaceBaselines(t *testing.T) {
 	if second.TotalUp != 80 || second.TotalDown != 100 {
 		t.Fatalf("per-interface deltas = %d/%d", second.TotalUp, second.TotalDown)
 	}
-
 	third, err := ledger.ObserveInterfaces(map[string]InterfaceCounter{
 		"eth0": {Up: 5, Down: 8},
 		"eth1": {Up: 1<<40 + 15, Down: 1<<40 + 30},
@@ -211,7 +170,7 @@ func TestLedgerUsesPerInterfaceBaselines(t *testing.T) {
 }
 
 func TestLedgerClampsOutOfOrderObservationTime(t *testing.T) {
-	ledger := newMemoryLedger(Config{Enabled: true, Day: 1, Timezone: "UTC"})
+	ledger := newMemoryLedger()
 	now := time.Date(2026, time.August, 2, 0, 0, 0, 0, time.UTC)
 	if _, err := ledger.ObserveInterfaces(map[string]InterfaceCounter{"eth0": {Up: 100, Down: 100}}, now); err != nil {
 		t.Fatal(err)
@@ -225,44 +184,8 @@ func TestLedgerClampsOutOfOrderObservationTime(t *testing.T) {
 	}
 }
 
-func TestLedgerResetsSamplingBaselineAtCycleBoundary(t *testing.T) {
-	config := Config{Enabled: true, Day: 1, Timezone: "UTC"}
-	ledger := newMemoryLedger(config)
-	before := time.Date(2026, time.August, 31, 23, 58, 0, 0, time.UTC)
-	if _, err := ledger.ObserveInterfaces(map[string]InterfaceCounter{"eth0": {Up: 100, Down: 200}}, before); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := ledger.ObserveInterfaces(map[string]InterfaceCounter{"eth0": {Up: 160, Down: 280}}, before.Add(time.Minute)); err != nil {
-		t.Fatal(err)
-	}
-
-	boundary := time.Date(2026, time.September, 1, 0, 0, 0, 0, time.UTC)
-	rotated, err := ledger.Snapshot(boundary)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if rotated.TotalUp != 0 || rotated.TotalDown != 0 {
-		t.Fatalf("boundary snapshot retained totals: %+v", rotated)
-	}
-
-	first, err := ledger.ObserveInterfaces(map[string]InterfaceCounter{"eth0": {Up: 170, Down: 300}}, boundary.Add(time.Minute))
-	if err != nil {
-		t.Fatal(err)
-	}
-	if first.TotalUp != 0 || first.TotalDown != 0 {
-		t.Fatalf("post-boundary baseline counted pre-boundary traffic: %+v", first)
-	}
-	second, err := ledger.ObserveInterfaces(map[string]InterfaceCounter{"eth0": {Up: 180, Down: 325}}, boundary.Add(2*time.Minute))
-	if err != nil {
-		t.Fatal(err)
-	}
-	if second.TotalUp != 10 || second.TotalDown != 25 {
-		t.Fatalf("post-boundary delta = %d/%d", second.TotalUp, second.TotalDown)
-	}
-}
-
 func TestLedgerPreservesBaselineAcrossInterfaceDisappearance(t *testing.T) {
-	ledger := newMemoryLedger(Config{})
+	ledger := newMemoryLedger()
 	now := time.Date(2026, time.August, 1, 0, 0, 0, 0, time.UTC)
 	if _, err := ledger.ObserveInterfaces(map[string]InterfaceCounter{"eth0": {Up: 100, Down: 200}}, now); err != nil {
 		t.Fatal(err)
@@ -271,36 +194,27 @@ func TestLedgerPreservesBaselineAcrossInterfaceDisappearance(t *testing.T) {
 		t.Fatal(err)
 	}
 	got, err := ledger.ObserveInterfaces(map[string]InterfaceCounter{"eth0": {Up: 150, Down: 275}}, now.Add(2*time.Minute))
-	if err != nil {
-		t.Fatal(err)
-	}
-	if got.TotalUp != 50 || got.TotalDown != 75 {
-		t.Fatalf("reappearing interface delta = %d/%d", got.TotalUp, got.TotalDown)
+	if err != nil || got.TotalUp != 50 || got.TotalDown != 75 {
+		t.Fatalf("reappearing interface = %+v, err=%v", got, err)
 	}
 }
 
 func TestResetOperationIsIdempotentAcrossReload(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "ledger.json")
-	config := Config{Enabled: true, Day: 1, Timezone: "UTC"}
 	now := time.Date(2026, time.August, 2, 0, 0, 0, 0, time.UTC)
-	ledger, err := Open(path, config)
+	ledger, err := Open(path)
 	if err != nil {
 		t.Fatal(err)
 	}
-	first, err := ledger.ResetInterfacesForOperation(map[string]InterfaceCounter{
-		"eth0": {Up: 100, Down: 200},
-	}, "reset-operation-1", now)
+	first, err := ledger.ResetInterfacesForOperation(map[string]InterfaceCounter{"eth0": {Up: 100, Down: 200}}, "reset-operation-1", now)
 	if err != nil {
 		t.Fatal(err)
 	}
-
-	reloaded, err := Open(path, config)
+	reloaded, err := Open(path)
 	if err != nil {
 		t.Fatal(err)
 	}
-	replayed, err := reloaded.ResetInterfacesForOperation(map[string]InterfaceCounter{
-		"eth0": {Up: 900, Down: 900},
-	}, "reset-operation-1", now.Add(time.Minute))
+	replayed, err := reloaded.ResetInterfacesForOperation(map[string]InterfaceCounter{"eth0": {Up: 900, Down: 900}}, "reset-operation-1", now.Add(time.Minute))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -308,51 +222,11 @@ func TestResetOperationIsIdempotentAcrossReload(t *testing.T) {
 		replayed.TotalUp != first.TotalUp || replayed.TotalDown != first.TotalDown {
 		t.Fatalf("replayed reset changed result: first=%+v replayed=%+v", first, replayed)
 	}
-
-	got, err := reloaded.ObserveInterfaces(map[string]InterfaceCounter{
-		"eth0": {Up: 150, Down: 275},
-	}, now.Add(2*time.Minute))
+	got, err := reloaded.ObserveInterfaces(map[string]InterfaceCounter{"eth0": {Up: 150, Down: 275}}, now.Add(2*time.Minute))
 	if err != nil {
 		t.Fatal(err)
 	}
 	if got.TotalUp != 50 || got.TotalDown != 75 {
 		t.Fatalf("replayed reset changed baseline: %d/%d", got.TotalUp, got.TotalDown)
-	}
-}
-
-func TestFixedUTCOffsets(t *testing.T) {
-	tests := map[string]int{
-		"UTC":       0,
-		"UTC+8":     8 * 60,
-		"UTC+08:00": 8 * 60,
-		"UTC-05:30": -(5*60 + 30),
-		"GMT+14:00": 14 * 60,
-	}
-	for value, expected := range tests {
-		got, ok := fixedUTCOffsetMinutes(value)
-		if !ok || got != expected {
-			t.Fatalf("fixedUTCOffsetMinutes(%q) = %d, %v; want %d, true", value, got, ok, expected)
-		}
-	}
-	for _, value := range []string{"UTC+14:01", "UTC+15:00", "UTC+08:99", "UTC+8:5", "Mars/Olympus"} {
-		if _, ok := fixedUTCOffsetMinutes(value); ok {
-			t.Fatalf("invalid offset %q was accepted", value)
-		}
-	}
-}
-
-func TestCycleStartUsesPerClientTimezone(t *testing.T) {
-	now := time.Date(2026, time.August, 1, 0, 30, 0, 0, time.UTC)
-	plusEight := cycleStart(Config{Enabled: true, Day: 1, Timezone: "UTC+08:00"}, now)
-	if want := time.Date(2026, time.July, 31, 16, 0, 0, 0, time.UTC); !plusEight.Equal(want) {
-		t.Fatalf("UTC+08 cycle start = %s, want %s", plusEight, want)
-	}
-	minusFive := cycleStart(Config{Enabled: true, Day: 1, Timezone: "UTC-05:00"}, now)
-	if want := time.Date(2026, time.July, 1, 5, 0, 0, 0, time.UTC); !minusFive.Equal(want) {
-		t.Fatalf("UTC-05 cycle start = %s, want %s", minusFive, want)
-	}
-	newYork := cycleStart(Config{Enabled: true, Day: 1, Timezone: "America/New_York"}, time.Date(2026, time.August, 2, 0, 0, 0, 0, time.UTC))
-	if want := time.Date(2026, time.August, 1, 4, 0, 0, 0, time.UTC); !newYork.Equal(want) {
-		t.Fatalf("New York cycle start = %s, want %s", newYork, want)
 	}
 }

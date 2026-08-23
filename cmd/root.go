@@ -74,11 +74,7 @@ var RootCmd = &cobra.Command{
 			go WarnMonitorRunning()
 		}
 
-		if err := trafficledger.Initialize(flags.TrafficStatePath, trafficledger.Config{
-			Enabled:  flags.MonthRotate != 0,
-			Day:      flags.MonthRotate,
-			Timezone: "Asia/Shanghai",
-		}); err != nil {
+		if err := trafficledger.Initialize(flags.TrafficStatePath); err != nil {
 			return fmt.Errorf("failed to initialize traffic ledger: %w", err)
 		}
 
@@ -159,7 +155,6 @@ func init() {
 	RootCmd.PersistentFlags().StringVar(&flags.IncludeNics, "include-nics", "", "Comma-separated list of network interfaces to include")
 	RootCmd.PersistentFlags().StringVar(&flags.ExcludeNics, "exclude-nics", "", "Comma-separated list of network interfaces to exclude")
 	RootCmd.PersistentFlags().StringVar(&flags.IncludeMountpoints, "include-mountpoint", "", "Semicolon-separated list of mount points to include for disk statistics")
-	RootCmd.PersistentFlags().IntVar(&flags.MonthRotate, "month-rotate", 0, "Month reset for network statistics (0 to disable)")
 	RootCmd.PersistentFlags().StringVar(&flags.TrafficStatePath, "traffic-state", "", "Persistent traffic ledger path")
 	RootCmd.PersistentFlags().StringVar(&flags.CFAccessClientID, "cf-access-client-id", "", "Cloudflare Access Client ID")
 	RootCmd.PersistentFlags().StringVar(&flags.CFAccessClientSecret, "cf-access-client-secret", "", "Cloudflare Access Client Secret")

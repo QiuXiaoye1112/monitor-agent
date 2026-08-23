@@ -7,7 +7,6 @@ import (
 	"math"
 	"time"
 
-	"monitor-agent/monitoring/trafficledger"
 	unit "monitor-agent/monitoring/unit"
 )
 
@@ -99,10 +98,6 @@ func ResetTraffic(operationID string) (TrafficSnapshot, error) {
 		CycleGeneration: snapshot.CycleGeneration, SampleSequence: snapshot.SampleSequence,
 		TotalUp: int64(snapshot.TotalUp), TotalDown: int64(snapshot.TotalDown),
 	}, nil
-}
-
-func ConfigureNetworkTraffic(config trafficledger.Config) (trafficledger.Snapshot, error) {
-	return unit.ConfigureNetworkTraffic(config)
 }
 
 func GenerateReport() []byte {

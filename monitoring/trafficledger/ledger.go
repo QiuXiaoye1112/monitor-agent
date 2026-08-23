@@ -9,7 +9,6 @@ import (
 	"os"
 	"path/filepath"
 	"strconv"
-	"strings"
 	"sync"
 	"time"
 )
@@ -19,14 +18,6 @@ const (
 	resetOperationRetention      = 5 * time.Minute
 	maxRememberedResetOperations = 128
 )
-
-type Config struct {
-	Enabled  bool   `json:"enabled"`
-	Day      int    `json:"day"`
-	Hour     int    `json:"hour"`
-	Minute   int    `json:"minute"`
-	Timezone string `json:"timezone"`
-}
 
 type Snapshot struct {
 	CycleID         string
@@ -55,7 +46,6 @@ type persistedResetOperation struct {
 
 type persistedState struct {
 	Version         int                                  `json:"version"`
-	Config          Config                               `json:"config"`
 	LedgerEpoch     string                               `json:"ledger_epoch"`
 	CycleID         string                               `json:"cycle_id"`
 	CycleStartedAt  time.Time                            `json:"cycle_started_at"`
@@ -78,14 +68,12 @@ type Ledger struct {
 	lastSaved time.Time
 }
 
-var global = newMemoryLedger(Config{})
+var global = newMemoryLedger()
 
-func newMemoryLedger(config Config) *Ledger {
+func newMemoryLedger() *Ledger {
 	now := time.Now()
-	config = normalizeConfig(config)
-	start := cycleStart(config, now)
 	return &Ledger{state: persistedState{
-		Version: 1, Config: config, LedgerEpoch: newLedgerEpoch(), CycleID: cycleID(config, start), CycleStartedAt: start, CycleGeneration: 1,
+		Version: 1, LedgerEpoch: newLedgerEpoch(), CycleID: manualCycleID(now), CycleStartedAt: now, CycleGeneration: 1,
 	}}
 }
 
@@ -96,11 +84,11 @@ func DefaultPath() string {
 	return "traffic-ledger.json"
 }
 
-func Initialize(path string, config Config) error {
+func Initialize(path string) error {
 	if path == "" {
 		path = DefaultPath()
 	}
-	ledger, err := Open(path, config)
+	ledger, err := Open(path)
 	if err != nil {
 		return err
 	}
@@ -108,8 +96,8 @@ func Initialize(path string, config Config) error {
 	return nil
 }
 
-func Open(path string, config Config) (*Ledger, error) {
-	ledger := newMemoryLedger(config)
+func Open(path string) (*Ledger, error) {
+	ledger := newMemoryLedger()
 	ledger.path = path
 	data, err := os.ReadFile(path)
 	if err != nil {
@@ -122,12 +110,11 @@ func Open(path string, config Config) (*Ledger, error) {
 		_ = os.Rename(path, path+".bak")
 		return ledger, ledger.saveLocked(time.Now())
 	}
-	ledger.state.Config = normalizeConfig(ledger.state.Config)
 	if ledger.state.CycleGeneration == 0 {
 		ledger.state.CycleGeneration = 1
 	}
 	if ledger.state.Version != 1 || ledger.state.CycleID == "" || ledger.state.CycleStartedAt.IsZero() {
-		ledger = newMemoryLedger(config)
+		ledger = newMemoryLedger()
 		ledger.path = path
 		return ledger, ledger.saveLocked(time.Now())
 	}
@@ -150,10 +137,6 @@ func ObserveInterfaces(counters map[string]InterfaceCounter, now time.Time) (Sna
 
 func SnapshotNow(now time.Time) (Snapshot, error) {
 	return global.Snapshot(now)
-}
-
-func Configure(config Config, now time.Time) (Snapshot, error) {
-	return global.Configure(config, now)
 }
 
 func Reset(rawUp, rawDown uint64, now time.Time) (Snapshot, error) {
@@ -179,9 +162,8 @@ func (ledger *Ledger) Observe(rawUp, rawDown uint64, now time.Time) (Snapshot, e
 	defer ledger.mu.Unlock()
 
 	now = ledger.monotonicObservationTimeLocked(now)
-	boundaryChanged := ledger.rotateLocked(now)
 	ledger.advanceSampleSequenceLocked()
-	if ledger.state.HasRaw && !boundaryChanged {
+	if ledger.state.HasRaw {
 		ledger.state.TotalUp = saturatingAdd(ledger.state.TotalUp, counterDelta(rawUp, ledger.state.LastRawUp))
 		ledger.state.TotalDown = saturatingAdd(ledger.state.TotalDown, counterDelta(rawDown, ledger.state.LastRawDown))
 	}
@@ -189,7 +171,7 @@ func (ledger *Ledger) Observe(rawUp, rawDown uint64, now time.Time) (Snapshot, e
 	ledger.state.LastRawDown = rawDown
 	ledger.state.HasRaw = true
 
-	if boundaryChanged || ledger.lastSaved.IsZero() || now.Sub(ledger.lastSaved) >= saveInterval {
+	if ledger.lastSaved.IsZero() || now.Sub(ledger.lastSaved) >= saveInterval {
 		if err := ledger.saveLocked(now); err != nil {
 			return ledger.snapshotLocked(), err
 		}
@@ -202,7 +184,6 @@ func (ledger *Ledger) ObserveInterfaces(counters map[string]InterfaceCounter, no
 	defer ledger.mu.Unlock()
 
 	now = ledger.monotonicObservationTimeLocked(now)
-	boundaryChanged := ledger.rotateLocked(now)
 	ledger.advanceSampleSequenceLocked()
 	current := make(map[string]persistedInterfaceCounter, len(counters))
 	var rawUp, rawDown uint64
@@ -215,23 +196,21 @@ func (ledger *Ledger) ObserveInterfaces(counters map[string]InterfaceCounter, no
 		rawDown = saturatingAdd(rawDown, counter.Down)
 	}
 
-	if !boundaryChanged {
-		if ledger.state.Interfaces == nil {
-			// Older ledger files only had aggregate counters. Preserve their
-			// one-time delta before switching to per-interface baselines.
-			if ledger.state.HasRaw {
-				ledger.state.TotalUp = saturatingAdd(ledger.state.TotalUp, counterDelta(rawUp, ledger.state.LastRawUp))
-				ledger.state.TotalDown = saturatingAdd(ledger.state.TotalDown, counterDelta(rawDown, ledger.state.LastRawDown))
+	if ledger.state.Interfaces == nil {
+		// Older ledger files only had aggregate counters. Preserve their
+		// one-time delta before switching to per-interface baselines.
+		if ledger.state.HasRaw {
+			ledger.state.TotalUp = saturatingAdd(ledger.state.TotalUp, counterDelta(rawUp, ledger.state.LastRawUp))
+			ledger.state.TotalDown = saturatingAdd(ledger.state.TotalDown, counterDelta(rawDown, ledger.state.LastRawDown))
+		}
+	} else {
+		for name, counter := range current {
+			previous, exists := ledger.state.Interfaces[name]
+			if !exists {
+				continue
 			}
-		} else {
-			for name, counter := range current {
-				previous, exists := ledger.state.Interfaces[name]
-				if !exists {
-					continue
-				}
-				ledger.state.TotalUp = saturatingAdd(ledger.state.TotalUp, counterDelta(counter.Up, previous.Up))
-				ledger.state.TotalDown = saturatingAdd(ledger.state.TotalDown, counterDelta(counter.Down, previous.Down))
-			}
+			ledger.state.TotalUp = saturatingAdd(ledger.state.TotalUp, counterDelta(counter.Up, previous.Up))
+			ledger.state.TotalDown = saturatingAdd(ledger.state.TotalDown, counterDelta(counter.Down, previous.Down))
 		}
 	}
 
@@ -249,7 +228,7 @@ func (ledger *Ledger) ObserveInterfaces(counters map[string]InterfaceCounter, no
 	ledger.state.LastRawUp = rawUp
 	ledger.state.LastRawDown = rawDown
 	ledger.state.HasRaw = true
-	if boundaryChanged || ledger.lastSaved.IsZero() || now.Sub(ledger.lastSaved) >= saveInterval {
+	if ledger.lastSaved.IsZero() || now.Sub(ledger.lastSaved) >= saveInterval {
 		if err := ledger.saveLocked(now); err != nil {
 			return ledger.snapshotLocked(), err
 		}
@@ -260,35 +239,7 @@ func (ledger *Ledger) ObserveInterfaces(counters map[string]InterfaceCounter, no
 func (ledger *Ledger) Snapshot(now time.Time) (Snapshot, error) {
 	ledger.mu.Lock()
 	defer ledger.mu.Unlock()
-	now = ledger.monotonicObservationTimeLocked(now)
-	if ledger.rotateLocked(now) {
-		if err := ledger.saveLocked(now); err != nil {
-			return ledger.snapshotLocked(), err
-		}
-	}
-	return ledger.snapshotLocked(), nil
-}
-
-func (ledger *Ledger) Configure(config Config, now time.Time) (Snapshot, error) {
-	ledger.mu.Lock()
-	defer ledger.mu.Unlock()
-	now = ledger.monotonicObservationTimeLocked(now)
-	config = normalizeConfig(config)
-	if ledger.state.Config == config {
-		return ledger.snapshotLocked(), nil
-	}
-	ledger.state.Config = config
-	ledger.startCycleLocked(now)
-	// A configuration change starts a new sampling baseline. Do not attribute
-	// traffic observed before the change to the new cycle.
-	ledger.state.Interfaces = nil
-	ledger.state.LastRawUp = 0
-	ledger.state.LastRawDown = 0
-	ledger.state.HasRaw = false
-	ledger.state.ResetOperations = nil
-	if err := ledger.saveLocked(now); err != nil {
-		return ledger.snapshotLocked(), err
-	}
+	ledger.monotonicObservationTimeLocked(now)
 	return ledger.snapshotLocked(), nil
 }
 
@@ -380,35 +331,9 @@ func (ledger *Ledger) rememberResetOperationLocked(operationID string, snapshot 
 	}
 }
 
-func (ledger *Ledger) rotateLocked(now time.Time) bool {
-	if !ledger.state.Config.Enabled {
-		return false
-	}
-	start := cycleStart(ledger.state.Config, now)
-	id := cycleID(ledger.state.Config, start)
-	if id == ledger.state.CycleID {
-		return false
-	}
-	ledger.state.CycleID = id
-	ledger.state.CycleStartedAt = start
-	ledger.advanceCycleGenerationLocked()
-	ledger.state.TotalUp = 0
-	ledger.state.TotalDown = 0
-	ledger.state.SampleSequence = 0
-	ledger.state.Interfaces = nil
-	ledger.state.LastRawUp = 0
-	ledger.state.LastRawDown = 0
-	ledger.state.HasRaw = false
-	return true
-}
-
 func (ledger *Ledger) startCycleLocked(now time.Time) {
-	start := now
-	if ledger.state.Config.Enabled {
-		start = cycleStart(ledger.state.Config, now)
-	}
-	ledger.state.CycleID = cycleID(ledger.state.Config, start)
-	ledger.state.CycleStartedAt = start
+	ledger.state.CycleID = manualCycleID(now)
+	ledger.state.CycleStartedAt = now
 	ledger.advanceCycleGenerationLocked()
 	ledger.state.TotalUp = 0
 	ledger.state.TotalDown = 0
@@ -482,99 +407,8 @@ func (ledger *Ledger) saveLocked(now time.Time) error {
 	return nil
 }
 
-func normalizeConfig(config Config) Config {
-	if config.Day < 1 || config.Day > 31 {
-		config.Day = 1
-	}
-	if config.Hour < 0 || config.Hour > 23 {
-		config.Hour = 0
-	}
-	if config.Minute < 0 || config.Minute > 59 {
-		config.Minute = 0
-	}
-	if config.Timezone == "" {
-		config.Timezone = "Asia/Shanghai"
-	}
-	config.Timezone = strings.TrimSpace(config.Timezone)
-	if _, err := configuredLocation(config.Timezone); err != nil {
-		config.Timezone = "UTC"
-	}
-	return config
-}
-
-func cycleStart(config Config, now time.Time) time.Time {
-	if !config.Enabled {
-		return now
-	}
-	loc, err := configuredLocation(config.Timezone)
-	if err != nil {
-		loc = time.UTC
-	}
-	localNow := now.In(loc)
-	this := monthlyBoundary(localNow.Year(), localNow.Month(), config, loc)
-	if !localNow.Before(this) {
-		return this
-	}
-	return monthlyBoundary(localNow.AddDate(0, -1, 0).Year(), localNow.AddDate(0, -1, 0).Month(), config, loc)
-}
-
-func configuredLocation(value string) (*time.Location, error) {
-	if offsetMinutes, ok := fixedUTCOffsetMinutes(value); ok {
-		return time.FixedZone(value, offsetMinutes*60), nil
-	}
-	return time.LoadLocation(value)
-}
-
-func fixedUTCOffsetMinutes(value string) (int, bool) {
-	if value == "UTC" || value == "GMT" {
-		return 0, true
-	}
-	if len(value) < 5 ||
-		!(strings.HasPrefix(value, "UTC+") || strings.HasPrefix(value, "UTC-") || strings.HasPrefix(value, "GMT+") || strings.HasPrefix(value, "GMT-")) {
-		return 0, false
-	}
-	sign := 1
-	if value[3] == '-' {
-		sign = -1
-	}
-	parts := strings.Split(value[4:], ":")
-	if len(parts) > 2 || parts[0] == "" {
-		return 0, false
-	}
-	hours, err := strconv.Atoi(parts[0])
-	if err != nil {
-		return 0, false
-	}
-	minutes := 0
-	if len(parts) == 2 {
-		if len(parts[1]) != 2 {
-			return 0, false
-		}
-		minutes, err = strconv.Atoi(parts[1])
-		if err != nil {
-			return 0, false
-		}
-	}
-	if hours > 14 || minutes > 59 || (hours == 14 && minutes != 0) {
-		return 0, false
-	}
-	return sign * (hours*60 + minutes), true
-}
-
-func monthlyBoundary(year int, month time.Month, config Config, loc *time.Location) time.Time {
-	lastDay := time.Date(year, month+1, 0, 0, 0, 0, 0, loc).Day()
-	day := config.Day
-	if day > lastDay {
-		day = lastDay
-	}
-	return time.Date(year, month, day, config.Hour, config.Minute, 0, 0, loc)
-}
-
-func cycleID(config Config, start time.Time) string {
-	if !config.Enabled {
-		return "manual:" + start.UTC().Format(time.RFC3339Nano)
-	}
-	return start.UTC().Format(time.RFC3339)
+func manualCycleID(start time.Time) string {
+	return "manual:" + start.UTC().Format(time.RFC3339Nano)
 }
 
 func counterDelta(current, previous uint64) uint64 {
